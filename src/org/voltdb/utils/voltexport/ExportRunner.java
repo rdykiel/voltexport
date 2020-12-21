@@ -86,6 +86,8 @@ public class ExportRunner implements Runnable {
 
     @Override
     public void run() {
+
+        Exception lastError = null;
         try {
             setup();
 
@@ -109,13 +111,23 @@ public class ExportRunner implements Runnable {
                 pb = null;
 
             } while (true);
-
         }
         catch (Exception e) {
             LOG.error(this + " failed, exiting after " + m_count + " rows", e);
+            lastError = e;
         }
-        LOG.info(this + " processed " + m_count + " rows");
-        System.out.println(this + " processed " + m_count + " rows");
+        finally {
+            finalizeDecoder();
+        }
+
+        // FIXME: we'll need to also print the number of rows skipped in order to
+        // let the user resume after a failure
+        if (lastError == null) {
+            LOG.info(this + " processed " + m_count + " rows, export COMPLETE");
+        }
+        else {
+            LOG.info(this + " processed " + m_count + " rows, export INCOMPLETE");
+        }
     }
 
     @Override
@@ -172,7 +184,6 @@ public class ExportRunner implements Runnable {
                 // Get a decoder for this attempt at decoding the block.
                 // A block timeout may reset it and should generate a RestartBlockException
                 ExportDecoderBase edb = getDecoder(block);
-                LOG.info("XXX buf position = " + buf.position() + ", limit = " + buf.limit());
 
                 // Process rows
                 while (buf.hasRemaining() && canPoll()) {

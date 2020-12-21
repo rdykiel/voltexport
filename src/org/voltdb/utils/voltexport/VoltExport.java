@@ -20,17 +20,29 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 
 import org.voltcore.logging.VoltLogger;
+import org.voltcore.utils.DBBPool.BBContainer;
 import org.voltcore.utils.Pair;
 import org.voltdb.CLIConfig;
+import org.voltdb.CatalogContext;
+import org.voltdb.ClientInterface;
+import org.voltdb.ExportStatsBase.ExportStatsRow;
+import org.voltdb.SnapshotCompletionMonitor.ExportSnapshotTuple;
+import org.voltdb.VoltTable;
+import org.voltdb.client.ProcedureCallback;
+import org.voltdb.export.ExportDataSource.StreamStartAction;
+import org.voltdb.export.ExportManagerInterface;
+import org.voltdb.export.ExportStats;
+import org.voltdb.export.Generation;
 import org.voltdb.exportclient.ExportClientBase;
+import org.voltdb.sysprocs.ExportControl.OperationMode;
 
 import com.google.common.collect.ImmutableMap;
-
-import jline.internal.Log;
 
 public class VoltExport {
     public static final VoltLogger LOG = new VoltLogger("VOLTEXPORT");
@@ -73,51 +85,54 @@ public class VoltExport {
     void run() throws IOException {
         Set<Integer> partitions = new HashSet<>();
         try {
-        // Check directories
-        File indir = new File(s_cfg.export_overflow);
-        if (!indir.canRead()) {
-            throw new IOException("Cannot read input directory " + indir.getAbsolutePath());
-        }
+            // Set up dummy ExportManager to enable E3 behavior
+            ExportManagerInterface.setInstanceForTest(new DummyManager());
 
-        File outdir = new File(s_cfg.out_dir);
-        if (!outdir.canWrite()) {
-            throw new IOException("Cannot write output directory " + outdir.getAbsolutePath());
-        }
-        // Overwrite out_dir config with absolute path
-        if (!s_cfg.out_dir.equals(outdir.getAbsolutePath())) {
-            s_cfg.out_dir = outdir.getAbsolutePath();
-        }
+            // Check directories
+            File indir = new File(s_cfg.export_overflow);
+            if (!indir.canRead()) {
+                throw new IOException("Cannot read input directory " + indir.getAbsolutePath());
+            }
 
-        // Parse input directory to identify streams and partitions
-        File files[] = indir.listFiles();
-        if (files == null || files.length == 0) {
-            throw new IOException("No files in input directory " + indir.getAbsolutePath());
-        }
+            File outdir = new File(s_cfg.out_dir);
+            if (!outdir.canWrite()) {
+                throw new IOException("Cannot write output directory " + outdir.getAbsolutePath());
+            }
+            // Overwrite out_dir config with absolute path
+            if (!s_cfg.out_dir.equals(outdir.getAbsolutePath())) {
+                s_cfg.out_dir = outdir.getAbsolutePath();
+            }
 
-        for (File data: files) {
-            if (data.getName().endsWith(".pbd")) {
-                // Note: PbdSegmentName#parseFile bugs here
-                Pair<String, Integer> topicPartition = getTopicPartition(data.getName());
-                if (s_cfg.stream_name.equalsIgnoreCase(topicPartition.getFirst())) {
-                    if (partitions.add(topicPartition.getSecond())) {
-                        Log.info("Detected stream " + topicPartition.getFirst() + " partition " + topicPartition.getSecond());
+            // Parse input directory to identify streams and partitions
+            File files[] = indir.listFiles();
+            if (files == null || files.length == 0) {
+                throw new IOException("No files in input directory " + indir.getAbsolutePath());
+            }
+
+            for (File data: files) {
+                if (data.getName().endsWith(".pbd")) {
+                    // Note: PbdSegmentName#parseFile bugs here
+                    Pair<String, Integer> topicPartition = getTopicPartition(data.getName());
+                    if (s_cfg.stream_name.equalsIgnoreCase(topicPartition.getFirst())) {
+                        if (partitions.add(topicPartition.getSecond())) {
+                            LOG.info("Detected stream " + topicPartition.getFirst() + " partition " + topicPartition.getSecond());
+                        }
+                    }
+                    else if (LOG.isDebugEnabled()) {
+                        LOG.debug("Ignoring " + data.getName()) ;
                     }
                 }
-                else if (LOG.isDebugEnabled()) {
-                    LOG.debug("Ignoring " + data.getName()) ;
-                }
             }
-        }
 
-        Properties props = getProperties(DEFAULT_TARGET);
-        ExportClientBase exportClient = createExportClient(m_clients.get(DEFAULT_TARGET), props);
+            Properties props = getProperties(DEFAULT_TARGET);
+            ExportClientBase exportClient = createExportClient(m_clients.get(DEFAULT_TARGET), props);
 
-        // Run one ExportRunner per partition
-        ArrayList<Thread> threads = new ArrayList<>(partitions.size());
-        partitions.forEach(p -> threads.add(new Thread(new ExportRunner(s_cfg, p, exportClient))));
+            // Run one ExportRunner per partition
+            ArrayList<Thread> threads = new ArrayList<>(partitions.size());
+            partitions.forEach(p -> threads.add(new Thread(new ExportRunner(s_cfg, p, exportClient))));
 
-        threads.forEach(t -> t.start());
-        threads.forEach(t -> {try {t.join(); } catch(Exception e) {}});
+            threads.forEach(t -> t.start());
+            threads.forEach(t -> {try {t.join(); } catch(Exception e) {}});
         }
         catch (Exception e) {
             LOG.error("Failed exporting", e);
@@ -179,5 +194,152 @@ public class VoltExport {
             LOG.debug("Created export client " + exportClientClassName);
         }
         return client;
+    }
+
+    private static class DummyManager implements ExportManagerInterface {
+
+        // Pretend we're running E3
+        @Override
+        public ExportMode getExportMode() {
+            return ExportMode.ADVANCED;
+        }
+
+        @Override
+        public void clearOverflowData() throws SetupException {
+        }
+
+        @Override
+        public int getConnCount() {
+            // TODO Auto-generated method stub
+            return 0;
+        }
+
+        @Override
+        public Generation getGeneration() {
+            // TODO Auto-generated method stub
+            return null;
+        }
+
+        @Override
+        public ExportStats getExportStats() {
+            // TODO Auto-generated method stub
+            return null;
+        }
+
+        @Override
+        public int getExportTablesCount() {
+            // TODO Auto-generated method stub
+            return 0;
+        }
+
+        @Override
+        public List<ExportStatsRow> getStats(boolean interval) {
+            // TODO Auto-generated method stub
+            return null;
+        }
+
+        @Override
+        public void initialize(CatalogContext catalogContext, List<Pair<Integer, Integer>> localPartitionsToSites,
+                boolean isRejoin) {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void startListeners(ClientInterface cif) {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void shutdown() {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void startPolling(CatalogContext catalogContext, StreamStartAction action) {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void updateCatalog(CatalogContext catalogContext, boolean requireCatalogDiffCmdsApplyToEE,
+                boolean requiresNewExportGeneration, List<Pair<Integer, Integer>> localPartitionsToSites) {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void updateInitialExportStateToSeqNo(int partitionId, String streamName, StreamStartAction action,
+                Map<Integer, ExportSnapshotTuple> sequenceNumberPerPartition) {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void updateDanglingExportStates(StreamStartAction action,
+                Map<String, Map<Integer, ExportSnapshotTuple>> exportSequenceNumbers) {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void processStreamControl(String exportSource, List<String> exportTargets, OperationMode valueOf,
+                VoltTable results) {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void pushBuffer(int partitionId, String tableName, long startSequenceNumber,
+                long committedSequenceNumber, long tupleCount, long uniqueId, BBContainer buffer) {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void sync() {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void invokeMigrateRowsDelete(int partition, String tableName, long deletableTxnId,
+                ProcedureCallback cb) {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void waitOnClosingSources() {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void onDrainedSource(String tableName, int partition) {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void onClosingSource(String tableName, int partition) {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void onClosedSource(String tableName, int partition) {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void releaseResources(List<Integer> removedPartitions) {
+            // TODO Auto-generated method stub
+
+        }
+
     }
 }
