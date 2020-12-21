@@ -45,6 +45,7 @@ public class ExportRunner implements Runnable {
 
     private final VoltExportConfig m_cfg;
     private final int m_partition;
+    private final long m_skipRows;
     private final ExportClientBase m_exportClient;
 
     private Catalog m_catalog;
@@ -52,7 +53,9 @@ public class ExportRunner implements Runnable {
 
     private BinaryDeque<ExportRowSchema> m_pbd;
     private BinaryDequeReader<ExportRowSchema> m_reader;
-    private int m_count = 0;
+
+    private long m_skip = 0;
+    private long m_count = 0;
 
     // These may be changed by the block timeout logic
     private volatile ExportDecoderBase m_edb;
@@ -78,9 +81,10 @@ public class ExportRunner implements Runnable {
         }
     }
 
-    public ExportRunner(VoltExportConfig cfg, int partition, ExportClientBase exportClient) {
+    public ExportRunner(VoltExportConfig cfg, int partition, ExportClientBase exportClient, long skipRows) {
         m_cfg = cfg;
         m_partition = partition;
+        m_skipRows = skipRows;
         m_exportClient = exportClient;
     }
 
@@ -90,6 +94,9 @@ public class ExportRunner implements Runnable {
         Exception lastError = null;
         try {
             setup();
+            if (m_skipRows > 0) {
+                LOG.info(this + " will skip " + m_skipRows + " rows before exporting");
+            }
 
             m_reader = m_pbd.openForRead("foo");
             PollBlock pb = null;
@@ -103,11 +110,8 @@ public class ExportRunner implements Runnable {
                     LOG.debug(this + " polled " + pb);
                 }
 
-                if (!processBlock(pb)) {
-                    throw new RuntimeException(this + " failed block " + pb);
-                }
-                // Update count and discard polled block
-                m_count += pb.m_count;
+                // Process and discard polled block
+                processBlock(pb);
                 pb = null;
 
             } while (true);
@@ -120,13 +124,17 @@ public class ExportRunner implements Runnable {
             finalizeDecoder();
         }
 
-        // FIXME: we'll need to also print the number of rows skipped in order to
-        // let the user resume after a failure
+        // Print enough information to let the user resume after a failure
+        long total = m_skip + m_count;
         if (lastError == null) {
-            LOG.info(this + " processed " + m_count + " rows, export COMPLETE");
+            LOG.info(this + " processed " + total + " rows"
+                    + " (skipped = " + m_skip + ", exported = " + m_count + ")"
+                    + ", export COMPLETE");
         }
         else {
-            LOG.info(this + " processed " + m_count + " rows, export INCOMPLETE");
+            LOG.info(this + " processed " + total + " rows"
+                    + " (skipped = " + m_skip + ", exported = " + m_count + ")"
+                    + ", export INCOMPLETE");
         }
     }
 
@@ -160,8 +168,16 @@ public class ExportRunner implements Runnable {
         return !Thread.currentThread().isInterrupted();
     }
 
-    private boolean processBlock(PollBlock block) throws Exception {
+    private void processBlock(PollBlock block) throws Exception {
         int backoffQuantity = 10 + (int)(10 * ThreadLocalRandom.current().nextDouble());
+
+        if (m_skipRows > 0 && (m_skip + block.m_count < m_skipRows)) {
+            if (LOG.isDebugEnabled()) {
+                LOG.debug(this + " skipping block " + block);
+            }
+            m_skip += block.m_count;
+            return;
+        }
 
         while(canPoll()) {
             m_blockId += 1;
@@ -173,7 +189,6 @@ public class ExportRunner implements Runnable {
                 }}, s_blockTimeoutMs, TimeUnit.MILLISECONDS);
 
             try {
-                long tupleCount = 0;
                 final ByteBuffer buf = block.m_entry.getData();
                 buf.order(ByteOrder.LITTLE_ENDIAN);
                 buf.position(StreamBlock.HEADER_SIZE);
@@ -191,6 +206,7 @@ public class ExportRunner implements Runnable {
                     byte[] rowdata = new byte[length];
                     buf.get(rowdata, 0, length);
 
+                    // Handle schema change
                     ExportRow schema = edb.getExportRowSchema();
                     if (schema == null || schema.generation != block.m_entry.getExtraHeader().generation) {
 
@@ -204,6 +220,17 @@ public class ExportRunner implements Runnable {
                         }
                         edb.setExportRowSchema(newSchema);
                     }
+
+                    // Skip rows that need skipping in this block
+                    if (m_skipRows > 0 && m_skip < m_skipRows) {
+                        if (LOG.isDebugEnabled()) {
+                            LOG.debug(this + " skipping 1 row in block " + block);
+                        }
+                        m_skip += 1;
+                        continue;
+                    }
+
+                    // Export row
                     row = ExportRow.decodeRow(edb.getExportRowSchema(), m_partition,
                             System.currentTimeMillis(), rowdata);
 
@@ -212,15 +239,15 @@ public class ExportRunner implements Runnable {
                         firstRowOfBlock = false;
                     }
                     edb.processRow(row);
-                    tupleCount++;
+                    m_count++;
                 }
 
                 if (row != null) {
                     edb.onBlockCompletion(row);
                 }
 
-                // This block was completely processed if we processed all tuples
-                return tupleCount == block.m_count;
+                // Done with the block
+                return;
             }
             catch (RestartBlockException e) {
                 if (!canPoll()) {
@@ -257,7 +284,6 @@ public class ExportRunner implements Runnable {
                 blockTimeout.cancel(false);
             }
         }
-        return false;
     }
 
     private int doBackoff(int curBackoff, PollBlock block) {

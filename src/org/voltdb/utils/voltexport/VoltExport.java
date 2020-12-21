@@ -21,6 +21,7 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -62,7 +63,7 @@ public class VoltExport {
      */
     public static class VoltExportConfig extends CLIConfig {
 
-        @Option(desc = "export_overflow directory (or location of saved export files")
+        @Option(desc = "export_overflow directory (or location of saved export files)")
         String export_overflow = "/tmp/export_overflow";
 
         @Option(desc = "Properties file or a string which can be parsed as a properties file, for export target configuration")
@@ -71,8 +72,11 @@ public class VoltExport {
         @Option(desc = "stream name to export")
         String stream_name = "";
 
-        @Option(desc = "partitions to export (comma-separated, default all partitions")
+        @Option(desc = "partitions to export (comma-separated, default all partitions)")
         String partitions = "";
+
+        @Option(desc = "list of skip entries allowing skipping rows to export (comma-separated, default no skipping)")
+        String skip = "";
 
         @Override
         public void printUsage() {
@@ -151,6 +155,9 @@ public class VoltExport {
                 partitions.addAll(requestedPartitions);
             }
 
+            // Parse an optional skipList
+            Map<Integer, Long> skipRows = getSkipRows(partitions);
+
             // Create client
             Properties props = getProperties(DEFAULT_TARGET);
             exportClient = createExportClient(m_clients.get(DEFAULT_TARGET), props);
@@ -159,7 +166,7 @@ public class VoltExport {
             int threads = exportClient.getDecodingPolicy() == DecodingPolicy.BY_PARTITION_TABLE ? partitions.size() : 1;
             ExecutorService es = Executors.newFixedThreadPool(threads);
             for (Integer partition : partitions) {
-                es.execute(new ExportRunner(s_cfg, partition, exportClient));
+                es.execute(new ExportRunner(s_cfg, partition, exportClient, skipRows.getOrDefault(partition, 0L)));
             }
 
             es.shutdown();
@@ -198,6 +205,39 @@ public class VoltExport {
         }
 
         return partitions;
+    }
+
+    /**
+     * Build a map of partitions -> rows to skip. Ignores unknown or undesired partitions
+     *
+     * @param partitions set of requested partitions
+     * @return a Map<partition, skip> of the skip rows, never {@code null}
+     */
+    Map<Integer, Long> getSkipRows(Set<Integer> partitions) {
+        Map<Integer, Long> skipRows = new HashMap<>();
+        if (StringUtils.isBlank(s_cfg.skip)) {
+            return skipRows;
+        }
+
+        List<String> partitionList = Splitter.on(',').splitToList(s_cfg.skip);
+        for(String partitionStr : partitionList) {
+            List<String> splitArgs = Splitter.on(':').splitToList(partitionStr.trim());
+            try {
+                Integer partition = Integer.parseInt(splitArgs.get(0).trim());
+                Long skip = Long.parseLong(splitArgs.get(1).trim());
+
+                if (!partitions.contains(partition)) {
+                    LOG.warn("Ignoring unknown or unwanted skip partition " + partition);
+                }
+                else {
+                    skipRows.put(partition, skip);
+                }
+            }
+            catch (NumberFormatException e) {
+                s_cfg.exitWithMessageAndUsage(partitionStr + " is not a valid split list (\"X:Y\", X = partition, Y = rows to skip)");
+            }
+        }
+        return skipRows;
     }
 
     // Totally inefficient PBD file name parsing
