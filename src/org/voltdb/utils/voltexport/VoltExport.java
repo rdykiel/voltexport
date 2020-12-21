@@ -47,6 +47,7 @@ import org.voltdb.export.ExportStats;
 import org.voltdb.export.Generation;
 import org.voltdb.exportclient.ExportClientBase;
 import org.voltdb.exportclient.ExportClientBase.DecodingPolicy;
+import org.voltdb.exportclient.ExportToFileClient;
 import org.voltdb.sysprocs.ExportControl.OperationMode;
 import org.voltdb.utils.StringInputStream;
 
@@ -105,6 +106,9 @@ public class VoltExport {
         try {
             // Set up dummy ExportManager to enable E3 behavior
             ExportManagerInterface.setInstanceForTest(new DummyManager());
+
+            // Set the root directory of the FILE export client
+            ExportToFileClient.TEST_VOLTDB_ROOT = System.getProperty("user.dir");
 
             // Check directories
             File indir = new File(s_cfg.export_overflow);
@@ -250,6 +254,7 @@ public class VoltExport {
                 }
                 properties.put("nonce", nonce);
             }
+            LOG.info("Exporting " + target + " to directory " + ExportToFileClient.TEST_VOLTDB_ROOT + "/" + properties.getProperty("outdir"));
         }
         return properties;
     }
