@@ -83,6 +83,7 @@ public class VoltExport {
     }
 
     void run() throws IOException {
+        ExportClientBase exportClient = null;
         Set<Integer> partitions = new HashSet<>();
         try {
             // Set up dummy ExportManager to enable E3 behavior
@@ -125,17 +126,29 @@ public class VoltExport {
             }
 
             Properties props = getProperties(DEFAULT_TARGET);
-            ExportClientBase exportClient = createExportClient(m_clients.get(DEFAULT_TARGET), props);
+            exportClient = createExportClient(m_clients.get(DEFAULT_TARGET), props);
 
             // Run one ExportRunner per partition
             ArrayList<Thread> threads = new ArrayList<>(partitions.size());
-            partitions.forEach(p -> threads.add(new Thread(new ExportRunner(s_cfg, p, exportClient))));
+            for (Integer partition : partitions) {
+                threads.add(new Thread(new ExportRunner(s_cfg, partition, exportClient)));
+            }
 
             threads.forEach(t -> t.start());
             threads.forEach(t -> {try {t.join(); } catch(Exception e) {}});
         }
         catch (Exception e) {
             LOG.error("Failed exporting", e);
+        }
+        finally {
+            if (exportClient != null) {
+                try {
+                exportClient.shutdown();
+                }
+                catch(Exception e) {
+                    LOG.error("Failed shutting down export client", e);
+                }
+            }
         }
         LOG.info("Finished exporting " + partitions.size() + " partitions of stream " + s_cfg.stream_name);
     }
