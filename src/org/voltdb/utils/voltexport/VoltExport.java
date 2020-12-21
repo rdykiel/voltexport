@@ -24,6 +24,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.lang3.StringUtils;
 import org.voltcore.logging.VoltLogger;
@@ -41,6 +44,7 @@ import org.voltdb.export.ExportManagerInterface;
 import org.voltdb.export.ExportStats;
 import org.voltdb.export.Generation;
 import org.voltdb.exportclient.ExportClientBase;
+import org.voltdb.exportclient.ExportClientBase.DecodingPolicy;
 import org.voltdb.sysprocs.ExportControl.OperationMode;
 
 import com.google_voltpatches.common.base.Splitter;
@@ -153,20 +157,15 @@ public class VoltExport {
             Properties props = getProperties(DEFAULT_TARGET);
             exportClient = createExportClient(m_clients.get(DEFAULT_TARGET), props);
 
-            // Run one ExportRunner per partition
-            ArrayList<Thread> threads = new ArrayList<>(partitions.size());
+            // Run ExportRunners per the exportClient's decoding policy
+            int threads = exportClient.getDecodingPolicy() == DecodingPolicy.BY_PARTITION_TABLE ? partitions.size() : 1;
+            ExecutorService es = Executors.newFixedThreadPool(threads);
             for (Integer partition : partitions) {
-                if (requestedPartitions != null && !requestedPartitions.contains(partition)) {
-                    if (LOG.isDebugEnabled()) {
-                        LOG.debug("Ignoring unwanted partition " + partition) ;
-                        continue;
-                    }
-                }
-                threads.add(new Thread(new ExportRunner(s_cfg, partition, exportClient)));
+                es.execute(new ExportRunner(s_cfg, partition, exportClient));
             }
 
-            threads.forEach(t -> t.start());
-            threads.forEach(t -> {try {t.join(); } catch(Exception e) {}});
+            es.shutdown();
+            es.awaitTermination(1, TimeUnit.DAYS);
         }
         catch (Exception e) {
             LOG.error("Failed exporting", e);
