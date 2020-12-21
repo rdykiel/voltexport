@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 
+import org.apache.commons.lang3.StringUtils;
 import org.voltcore.logging.VoltLogger;
 import org.voltcore.utils.DBBPool.BBContainer;
 import org.voltcore.utils.Pair;
@@ -42,7 +43,8 @@ import org.voltdb.export.Generation;
 import org.voltdb.exportclient.ExportClientBase;
 import org.voltdb.sysprocs.ExportControl.OperationMode;
 
-import com.google.common.collect.ImmutableMap;
+import com.google_voltpatches.common.base.Splitter;
+import com.google_voltpatches.common.collect.ImmutableMap;
 
 public class VoltExport {
     public static final VoltLogger LOG = new VoltLogger("VOLTEXPORT");
@@ -60,6 +62,14 @@ public class VoltExport {
 
         @Option(desc = "stream name to export")
         String stream_name = "";
+
+        @Option(desc = "partitions to export (comma-separated, default all partitions")
+        String partitions = "";
+
+        @Override
+        public void printUsage() {
+            super.printUsage();
+        }
     }
     private static VoltExportConfig s_cfg = new VoltExportConfig();
 
@@ -92,22 +102,25 @@ public class VoltExport {
             // Check directories
             File indir = new File(s_cfg.export_overflow);
             if (!indir.canRead()) {
-                throw new IOException("Cannot read input directory " + indir.getAbsolutePath());
+                s_cfg.exitWithMessageAndUsage("Cannot read input directory " + indir.getAbsolutePath());
             }
 
             File outdir = new File(s_cfg.out_dir);
             if (!outdir.canWrite()) {
-                throw new IOException("Cannot write output directory " + outdir.getAbsolutePath());
+                s_cfg.exitWithMessageAndUsage("Cannot write output directory " + outdir.getAbsolutePath());
             }
             // Overwrite out_dir config with absolute path
             if (!s_cfg.out_dir.equals(outdir.getAbsolutePath())) {
                 s_cfg.out_dir = outdir.getAbsolutePath();
             }
 
+            // Parse requested partitions
+            List<Integer> requestedPartitions = getRequestedPartitions();
+
             // Parse input directory to identify streams and partitions
             File files[] = indir.listFiles();
             if (files == null || files.length == 0) {
-                throw new IOException("No files in input directory " + indir.getAbsolutePath());
+                s_cfg.exitWithMessageAndUsage("No files in input directory " + indir.getAbsolutePath());
             }
 
             for (File data: files) {
@@ -125,12 +138,28 @@ public class VoltExport {
                 }
             }
 
+            // Verify the requested partitions
+            if (requestedPartitions != null) {
+                for (Integer partition : requestedPartitions) {
+                    if (!partitions.contains(partition)) {
+                        s_cfg.exitWithMessageAndUsage("Unknown partition " + partition);
+                    }
+                }
+            }
+
+            // Create client
             Properties props = getProperties(DEFAULT_TARGET);
             exportClient = createExportClient(m_clients.get(DEFAULT_TARGET), props);
 
             // Run one ExportRunner per partition
             ArrayList<Thread> threads = new ArrayList<>(partitions.size());
             for (Integer partition : partitions) {
+                if (requestedPartitions != null && !requestedPartitions.contains(partition)) {
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("Ignoring unwanted partition " + partition) ;
+                        continue;
+                    }
+                }
                 threads.add(new Thread(new ExportRunner(s_cfg, partition, exportClient)));
             }
 
@@ -151,6 +180,25 @@ public class VoltExport {
             }
         }
         LOG.info("Finished exporting " + partitions.size() + " partitions of stream " + s_cfg.stream_name);
+    }
+
+    List<Integer> getRequestedPartitions() {
+        if (StringUtils.isBlank(s_cfg.partitions)) {
+            return null;
+        }
+        List<String> partitionList = Splitter.on(',').splitToList(s_cfg.partitions);
+        ArrayList<Integer> partitions = new ArrayList<>(partitionList.size());
+
+        for(String partitionStr : partitionList) {
+            try {
+                partitions.add(Integer.parseInt(partitionStr.trim()));
+            }
+            catch (NumberFormatException e) {
+                s_cfg.exitWithMessageAndUsage(partitionStr + " is not a valid partition");
+            }
+        }
+
+        return partitions;
     }
 
     // Totally inefficient PBD file name parsing
