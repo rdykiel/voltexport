@@ -145,6 +145,8 @@ public class VoltExport {
                         s_cfg.exitWithMessageAndUsage("Unknown partition " + partition);
                     }
                 }
+                partitions.clear();
+                partitions.addAll(requestedPartitions);
             }
 
             // Create client
