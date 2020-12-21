@@ -75,7 +75,7 @@ public class VoltExport {
         @Option(desc = "partitions to export (comma-separated, default all partitions)")
         String partitions = "";
 
-        @Option(desc = "list of skip entries allowing skipping rows to export (comma-separated, default no skipping)")
+        @Option(desc = "list of skip entries allowing skipping rows to export (comma-separated, default no skipping): each list element as \'X:Y\' (X=partition, Y=count)")
         String skip = "";
 
         @Override
@@ -233,7 +233,7 @@ public class VoltExport {
                     skipRows.put(partition, skip);
                 }
             }
-            catch (NumberFormatException e) {
+            catch (Exception e) {
                 s_cfg.exitWithMessageAndUsage(partitionStr + " is not a valid split list (\"X:Y\", X = partition, Y = rows to skip)");
             }
         }
