@@ -20,14 +20,21 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.Properties;
 import java.util.Set;
 
 import org.voltcore.logging.VoltLogger;
 import org.voltcore.utils.Pair;
 import org.voltdb.CLIConfig;
+import org.voltdb.exportclient.ExportClientBase;
+
+import com.google.common.collect.ImmutableMap;
+
+import jline.internal.Log;
 
 public class VoltExport {
     public static final VoltLogger LOG = new VoltLogger("VOLTEXPORT");
+
     /**
      * Configuration options.
      */
@@ -42,11 +49,19 @@ public class VoltExport {
         @Option(desc = "stream name to export")
         String stream_name = "";
     }
+    private static VoltExportConfig s_cfg = new VoltExportConfig();
 
-    static VoltExportConfig s_cfg = new VoltExportConfig();
+    // FIXME: may support different export targets in the future (see CatalogUtil.java)
+    // Only FILE is supported for now
+    static enum Target {
+        FILE,
+        JDBC
+    }
+    static Target DEFAULT_TARGET = Target.FILE;
 
-    File m_indir;
-    File m_outdir;
+    ImmutableMap<Target, String> m_clients = ImmutableMap.of(
+            Target.FILE, "org.voltdb.exportclient.ExportToFileClient",
+            Target.JDBC, "org.voltdb.exportclient.JDBCExportClient");
 
     public static void main(String[] args) throws IOException {
         s_cfg.parse(VoltExport.class.getName(), args);
@@ -56,57 +71,58 @@ public class VoltExport {
     }
 
     void run() throws IOException {
-        m_indir = new File(s_cfg.export_overflow);
-        if (!m_indir.canRead()) {
-            throw new IOException("Cannot read input directory " + m_indir.getAbsolutePath());
-        }
-
-        m_outdir = new File(s_cfg.out_dir);
-        if (!m_outdir.canWrite()) {
-            throw new IOException("Cannot write output directory " + m_outdir.getAbsolutePath());
-        }
-
-        File files[] = m_indir.listFiles();
-        if (files == null || files.length == 0) {
-            throw new IOException("No files in input directory " + m_indir.getAbsolutePath());
-        }
-
         Set<Integer> partitions = new HashSet<>();
+        try {
+        // Check directories
+        File indir = new File(s_cfg.export_overflow);
+        if (!indir.canRead()) {
+            throw new IOException("Cannot read input directory " + indir.getAbsolutePath());
+        }
+
+        File outdir = new File(s_cfg.out_dir);
+        if (!outdir.canWrite()) {
+            throw new IOException("Cannot write output directory " + outdir.getAbsolutePath());
+        }
+        // Overwrite out_dir config with absolute path
+        if (!s_cfg.out_dir.equals(outdir.getAbsolutePath())) {
+            s_cfg.out_dir = outdir.getAbsolutePath();
+        }
+
+        // Parse input directory to identify streams and partitions
+        File files[] = indir.listFiles();
+        if (files == null || files.length == 0) {
+            throw new IOException("No files in input directory " + indir.getAbsolutePath());
+        }
+
         for (File data: files) {
             if (data.getName().endsWith(".pbd")) {
-                System.out.println("XXX file = " + data.getName());
                 // Note: PbdSegmentName#parseFile bugs here
                 Pair<String, Integer> topicPartition = getTopicPartition(data.getName());
-                System.out.println("XXX topicPartition = " + topicPartition);
                 if (s_cfg.stream_name.equalsIgnoreCase(topicPartition.getFirst())) {
-                    partitions.add(topicPartition.getSecond());
+                    if (partitions.add(topicPartition.getSecond())) {
+                        Log.info("Detected stream " + topicPartition.getFirst() + " partition " + topicPartition.getSecond());
+                    }
                 }
-                else {
-                    LOG.info("Ignoring " + data.getName()) ;
+                else if (LOG.isDebugEnabled()) {
+                    LOG.debug("Ignoring " + data.getName()) ;
                 }
             }
         }
-        System.out.println("XXX Partitions for " + s_cfg.stream_name + " = " + partitions);
 
+        Properties props = getProperties(DEFAULT_TARGET);
+        ExportClientBase exportClient = createExportClient(m_clients.get(DEFAULT_TARGET), props);
+
+        // Run one ExportRunner per partition
         ArrayList<Thread> threads = new ArrayList<>(partitions.size());
-        /*
-        partitions.forEach(p -> threads.add(new Thread(new Runnable() {
-            @Override
-            public void run() {
-                // TODO Auto-generated method stub
-                try {
-                System.out.println("XXX thread " + p + " sleeping 10s...");
-                Thread.sleep(10_000);
-                } catch (Exception ignore) {
-                }
-
-            }})));
-            */
-        partitions.forEach(p -> threads.add(new Thread(new ExportRunner(s_cfg, p))));
+        partitions.forEach(p -> threads.add(new Thread(new ExportRunner(s_cfg, p, exportClient))));
 
         threads.forEach(t -> t.start());
         threads.forEach(t -> {try {t.join(); } catch(Exception e) {}});
-        System.out.println("XXX DONE " + threads.size() + " threads...");
+        }
+        catch (Exception e) {
+            LOG.error("Failed exporting", e);
+        }
+        LOG.info("Finished exporting " + partitions.size() + " partitions of stream " + s_cfg.stream_name);
     }
 
     // Totally inefficient PBD file name parsing
@@ -133,5 +149,35 @@ public class VoltExport {
         String partitionStr = meatloaf.substring(lastIndex + 1);
         Integer partition = Integer.parseInt(partitionStr);
         return Pair.of(streamName, partition);
+    }
+
+    private Properties getProperties(Target target) {
+        Properties props = new Properties();
+        switch(target) {
+            case FILE:
+                setFileProperties(props);
+                break;
+            default:
+                break;
+        }
+        return props;
+    }
+
+    private void setFileProperties(Properties props) {
+        props.put("nonce", s_cfg.stream_name.toUpperCase());
+        props.put("outdir", s_cfg.out_dir);
+    }
+
+    private ExportClientBase createExportClient(String exportClientClassName, Properties properties)
+            throws ClassNotFoundException, Exception {
+        final Class<?> clientClass = Class.forName(exportClientClassName);
+        ExportClientBase client = (ExportClientBase) clientClass.newInstance();
+        client.configure(properties);
+        client.setTargetName(s_cfg.stream_name);
+
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("Created export client " + exportClientClassName);
+        }
+        return client;
     }
 }
