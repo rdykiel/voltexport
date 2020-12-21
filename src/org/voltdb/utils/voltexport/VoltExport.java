@@ -17,7 +17,9 @@
 package org.voltdb.utils.voltexport;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -46,6 +48,7 @@ import org.voltdb.export.Generation;
 import org.voltdb.exportclient.ExportClientBase;
 import org.voltdb.exportclient.ExportClientBase.DecodingPolicy;
 import org.voltdb.sysprocs.ExportControl.OperationMode;
+import org.voltdb.utils.StringInputStream;
 
 import com.google_voltpatches.common.base.Splitter;
 import com.google_voltpatches.common.collect.ImmutableMap;
@@ -61,8 +64,8 @@ public class VoltExport {
         @Option(desc = "export_overflow directory (or location of saved export files")
         String export_overflow = "/tmp/export_overflow";
 
-        @Option(desc = "output directory, location of exported CSV files")
-        String out_dir = "/tmp/volt_export";
+        @Option(desc = "Properties file or a string which can be parsed as a properties file, for export target configuration")
+        String properties = "outdir=/tmp/voltexport_out";
 
         @Option(desc = "stream name to export")
         String stream_name = "";
@@ -107,15 +110,6 @@ public class VoltExport {
             File indir = new File(s_cfg.export_overflow);
             if (!indir.canRead()) {
                 s_cfg.exitWithMessageAndUsage("Cannot read input directory " + indir.getAbsolutePath());
-            }
-
-            File outdir = new File(s_cfg.out_dir);
-            if (!outdir.canWrite()) {
-                s_cfg.exitWithMessageAndUsage("Cannot write output directory " + outdir.getAbsolutePath());
-            }
-            // Overwrite out_dir config with absolute path
-            if (!s_cfg.out_dir.equals(outdir.getAbsolutePath())) {
-                s_cfg.out_dir = outdir.getAbsolutePath();
             }
 
             // Parse requested partitions
@@ -228,21 +222,36 @@ public class VoltExport {
         return Pair.of(streamName, partition);
     }
 
-    private Properties getProperties(Target target) {
-        Properties props = new Properties();
-        switch(target) {
-            case FILE:
-                setFileProperties(props);
-                break;
-            default:
-                break;
-        }
-        return props;
-    }
+    private Properties getProperties(Target target) throws IOException {
+        Properties properties = new Properties();
+        if (s_cfg.properties == null) {
+            LOG.info("No properties specifed for target " + target);
+        } else {
+            final InputStream in;
 
-    private void setFileProperties(Properties props) {
-        props.put("nonce", s_cfg.stream_name.toUpperCase());
-        props.put("outdir", s_cfg.out_dir);
+            File propFile = new File(s_cfg.properties);
+            if (propFile.exists()) {
+                in = new FileInputStream(propFile);
+            } else {
+                in = new StringInputStream(s_cfg.properties);
+            }
+            try (InputStream i = in) {
+                properties.load(i);
+            }
+        }
+
+        // Do some property checks and adjustments
+        if (target == Target.FILE) {
+            String nonce = properties.getProperty("nonce");
+            if (nonce == null) {
+                nonce = s_cfg.stream_name.toUpperCase();
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Setting nonce to " + nonce + " for " + target + " export");
+                }
+                properties.put("nonce", nonce);
+            }
+        }
+        return properties;
     }
 
     private ExportClientBase createExportClient(String exportClientClassName, Properties properties)
