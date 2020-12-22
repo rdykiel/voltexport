@@ -14,10 +14,6 @@ import org.voltcore.logging.Level;
 import org.voltcore.utils.CoreUtils;
 import org.voltcore.utils.EstTime;
 import org.voltcore.utils.RateLimitedLogger;
-import org.voltdb.catalog.Catalog;
-import org.voltdb.catalog.Cluster;
-import org.voltdb.catalog.Database;
-import org.voltdb.catalog.Table;
 import org.voltdb.export.AdvertisedDataSource;
 import org.voltdb.export.StreamBlock;
 import org.voltdb.exportclient.ExportClientBase;
@@ -48,9 +44,7 @@ public class ExportRunner implements Runnable {
     private final long m_skipRows;
     private final ExportClientBase m_exportClient;
 
-    private Catalog m_catalog;
     private AdvertisedDataSource m_ads;
-
     private BinaryDeque<ExportRowSchema> m_pbd;
     private BinaryDequeReader<ExportRowSchema> m_reader;
 
@@ -346,11 +340,6 @@ public class ExportRunner implements Runnable {
     }
 
     private void setup() throws IOException {
-        // Create dummy catalog and dummy table to enable pbd creation
-        m_catalog = new Catalog();
-        m_catalog.execute("add / clusters cluster");
-        m_catalog.execute("add /clusters#cluster databases database");
-        addTable(m_cfg.stream_name);
 
         // Create ads
         m_ads = new AdvertisedDataSource(
@@ -369,42 +358,12 @@ public class ExportRunner implements Runnable {
         constructPBD(nonce);
     }
 
-    /*
-     * BELOW hacked catalog copied from MockVoltDB
-     */
-    private void addTable(String tableName)
-    {
-        getDatabase().getTables().add(tableName);
-        getTable(tableName).setIsreplicated(false);
-        getTable(tableName).setSignature(tableName);
-    }
-
-    private Cluster getCluster()
-    {
-        return m_catalog.getClusters().get("cluster");
-    }
-
-    private Database getDatabase()
-    {
-        return getCluster().getDatabases().get("database");
-    }
-
-    private Table getTable(String tableName)
-    {
-        return getDatabase().getTables().get(tableName);
-    }
-
     private void constructPBD(String nonce) throws IOException {
-        Table streamTable = getTable(m_cfg.stream_name);
-
-        ExportRowSchema schema = ExportRowSchema.create(streamTable, m_partition, 1, 1);
         ExportRowSchemaSerializer serializer = new ExportRowSchemaSerializer();
-
         m_pbd = PersistentBinaryDeque.builder(nonce, new VoltFile(m_cfg.export_overflow), LOG)
-                .initialExtraHeader(schema, serializer)
+                .initialExtraHeader(null, serializer)
                 .compression(true)
                 .deleteExisting(false)
                 .build();
     }
-
 }
