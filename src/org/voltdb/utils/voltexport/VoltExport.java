@@ -65,7 +65,7 @@ public class VoltExport {
     public static class VoltExportConfig extends CLIConfig {
 
         @Option(desc = "export_overflow directory (or location of saved export files)")
-        String export_overflow = "/tmp/export_overflow";
+        String export_overflow = "";
 
         @Option(desc = "Properties file or a string which can be parsed as a properties file, for export target configuration")
         String properties = "outdir=/tmp/voltexport_out";
@@ -121,6 +121,9 @@ public class VoltExport {
             ExportToFileClient.TEST_VOLTDB_ROOT = System.getProperty("user.dir");
 
             // Check directories
+            if (StringUtils.isBlank(s_cfg.export_overflow)) {
+                s_cfg.exitWithMessageAndUsage("Missing --export_overflow parameter");
+            }
             File indir = new File(s_cfg.export_overflow);
             if (!indir.canRead()) {
                 s_cfg.exitWithMessageAndUsage("Cannot read input directory " + indir.getAbsolutePath());
