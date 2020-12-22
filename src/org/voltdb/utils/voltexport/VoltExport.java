@@ -30,6 +30,7 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 import org.apache.commons.lang3.StringUtils;
 import org.voltcore.logging.VoltLogger;
@@ -49,11 +50,11 @@ import org.voltdb.export.Generation;
 import org.voltdb.exportclient.ExportClientBase;
 import org.voltdb.exportclient.ExportClientBase.DecodingPolicy;
 import org.voltdb.exportclient.ExportToFileClient;
+import org.voltdb.exportclient.JDBCExportClient;
 import org.voltdb.sysprocs.ExportControl.OperationMode;
 import org.voltdb.utils.StringInputStream;
 
 import com.google_voltpatches.common.base.Splitter;
-import com.google_voltpatches.common.collect.ImmutableMap;
 
 public class VoltExport {
     public static final VoltLogger LOG = new VoltLogger("VOLTEXPORT");
@@ -85,17 +86,22 @@ public class VoltExport {
     }
     private static VoltExportConfig s_cfg = new VoltExportConfig();
 
-    // FIXME: may support different export targets in the future (see CatalogUtil.java)
-    // Only FILE is supported for now
+    // FIXME: may support different export targets in the future, only FILE is supported for now
     static enum Target {
-        FILE,
-        JDBC
+        FILE(ExportToFileClient::new),
+        JDBC(JDBCExportClient::new);
+
+        private final Supplier<ExportClientBase> m_factory;
+
+        Target(Supplier<ExportClientBase> factory) {
+            m_factory = factory;
+        }
+
+        public ExportClientBase create() {
+            return m_factory.get();
+        }
     }
     static Target DEFAULT_TARGET = Target.FILE;
-
-    ImmutableMap<Target, String> m_clients = ImmutableMap.of(
-            Target.FILE, "org.voltdb.exportclient.ExportToFileClient",
-            Target.JDBC, "org.voltdb.exportclient.JDBCExportClient");
 
     public static void main(String[] args) throws IOException {
         s_cfg.parse(VoltExport.class.getName(), args);
@@ -159,8 +165,7 @@ public class VoltExport {
             Map<Integer, Long> skipRows = getSkipRows(partitions);
 
             // Create client
-            Properties props = getProperties(DEFAULT_TARGET);
-            exportClient = createExportClient(m_clients.get(DEFAULT_TARGET), props);
+            exportClient = createExportClient(DEFAULT_TARGET);
 
             // Run ExportRunners per the exportClient's decoding policy
             int threads = exportClient.getDecodingPolicy() == DecodingPolicy.BY_PARTITION_TABLE ? partitions.size() : 1;
@@ -294,20 +299,20 @@ public class VoltExport {
                 }
                 properties.put("nonce", nonce);
             }
-            LOG.info("Exporting " + target + " to directory " + ExportToFileClient.TEST_VOLTDB_ROOT + "/" + properties.getProperty("outdir"));
+            LOG.info("Exporting " + target + " to directory "
+                    + ExportToFileClient.TEST_VOLTDB_ROOT + "/" + properties.getProperty("outdir"));
         }
         return properties;
     }
 
-    private ExportClientBase createExportClient(String exportClientClassName, Properties properties)
+    private ExportClientBase createExportClient(Target target)
             throws ClassNotFoundException, Exception {
-        final Class<?> clientClass = Class.forName(exportClientClassName);
-        ExportClientBase client = (ExportClientBase) clientClass.newInstance();
-        client.configure(properties);
+        ExportClientBase client = target.create();
+        client.configure(getProperties(target));
         client.setTargetName(s_cfg.stream_name);
 
         if (LOG.isDebugEnabled()) {
-            LOG.debug("Created export client " + exportClientClassName);
+            LOG.debug("Created export client " + client.getClass().getName());
         }
         return client;
     }
