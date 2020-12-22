@@ -197,12 +197,12 @@ public class VoltExport {
         if (StringUtils.isBlank(s_cfg.partitions)) {
             return null;
         }
-        List<String> partitionList = Splitter.on(',').splitToList(s_cfg.partitions);
+        List<String> partitionList = Splitter.on(',').trimResults().splitToList(s_cfg.partitions);
         ArrayList<Integer> partitions = new ArrayList<>(partitionList.size());
 
         for(String partitionStr : partitionList) {
             try {
-                partitions.add(Integer.parseInt(partitionStr.trim()));
+                partitions.add(Integer.parseInt(partitionStr));
             }
             catch (NumberFormatException e) {
                 s_cfg.exitWithMessageAndUsage(partitionStr + " is not a valid partition");
@@ -224,12 +224,12 @@ public class VoltExport {
             return skipRows;
         }
 
-        List<String> partitionList = Splitter.on(',').splitToList(s_cfg.skip);
+        List<String> partitionList = Splitter.on(',').trimResults().splitToList(s_cfg.skip);
         for(String partitionStr : partitionList) {
-            List<String> splitArgs = Splitter.on(':').splitToList(partitionStr.trim());
+            List<String> splitArgs = Splitter.on(':').trimResults().splitToList(partitionStr);
             try {
-                Integer partition = Integer.parseInt(splitArgs.get(0).trim());
-                Long skip = Long.parseLong(splitArgs.get(1).trim());
+                Integer partition = Integer.parseInt(splitArgs.get(0));
+                Long skip = Long.parseLong(splitArgs.get(1));
 
                 if (!partitions.contains(partition)) {
                     LOG.warn("Ignoring unknown or unwanted skip partition " + partition);
