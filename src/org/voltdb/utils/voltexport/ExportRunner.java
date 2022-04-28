@@ -1,6 +1,7 @@
 package org.voltdb.utils.voltexport;
 
 import static org.voltdb.utils.voltexport.VoltExport.LOG;
+import static org.voltdb.utils.voltexport.VoltExport.VOLTLOG;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -10,11 +11,10 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
-import org.voltcore.logging.Level;
 import org.voltcore.utils.CoreUtils;
-import org.voltcore.utils.EstTime;
-import org.voltcore.utils.RateLimitedLogger;
+import org.voltcore.utils.DBBPool.BBContainer;
 import org.voltdb.export.AdvertisedDataSource;
+import org.voltdb.export.ExportSequenceNumberTracker;
 import org.voltdb.export.StreamBlock;
 import org.voltdb.exportclient.ExportClientBase;
 import org.voltdb.exportclient.ExportDecoderBase;
@@ -23,14 +23,13 @@ import org.voltdb.exportclient.ExportRow;
 import org.voltdb.exportclient.ExportRowSchema;
 import org.voltdb.exportclient.ExportRowSchemaSerializer;
 import org.voltdb.utils.BinaryDeque;
+import org.voltdb.utils.BinaryDeque.BinaryDequeScanner;
 import org.voltdb.utils.BinaryDequeReader;
 import org.voltdb.utils.PersistentBinaryDeque;
 import org.voltdb.utils.VoltFile;
 import org.voltdb.utils.voltexport.VoltExport.VoltExportConfig;
 
 public class ExportRunner implements Runnable {
-    private final RateLimitedLogger logLimitedWarn =  new RateLimitedLogger(TimeUnit.MINUTES.toMillis(1), LOG, Level.WARN);
-
     // Create a singleton scheduled thread pool for block processing timeouts
     private static final ScheduledThreadPoolExecutor s_timeoutExecutor =
             CoreUtils.getScheduledThreadPoolExecutor("Block Processing Timeouts", 1, CoreUtils.MEDIUM_STACK_SIZE);
@@ -40,8 +39,6 @@ public class ExportRunner implements Runnable {
     private static final int BACKOFF_CAP_MS = 8000;
 
     private final VoltExportConfig m_cfg;
-    private final int m_partition;
-    private final long m_skipRows;
     private final ExportClientBase m_exportClient;
 
     private AdvertisedDataSource m_ads;
@@ -69,16 +66,18 @@ public class ExportRunner implements Runnable {
             m_last = m_start + m_count - 1;
         }
 
+        void release() {
+            m_entry.release();
+        }
+
         @Override
         public String toString() {
             return "[" + m_start + ", " + m_last +  ", " + m_count + "]";
         }
     }
 
-    public ExportRunner(VoltExportConfig cfg, int partition, ExportClientBase exportClient, long skipRows) {
+    public ExportRunner(VoltExportConfig cfg, ExportClientBase exportClient) {
         m_cfg = cfg;
-        m_partition = partition;
-        m_skipRows = skipRows;
         m_exportClient = exportClient;
     }
 
@@ -87,12 +86,14 @@ public class ExportRunner implements Runnable {
 
         Exception lastError = null;
         try {
+            LOG.info(this + " exporting: skip = " + m_cfg.skip  + ", count = " + m_cfg.count);
             setup();
-            if (m_skipRows > 0) {
-                LOG.info(this + " will skip " + m_skipRows + " rows before exporting");
-            }
 
             m_reader = m_pbd.openForRead("foo");
+            ExportSequenceNumberTracker tracker = new ExportSequenceNumberTracker(scanForGap());
+            LOG.info(this + " scanned PBD: " + tracker.toString());
+            if (m_cfg.onlyscan) return;
+
             PollBlock pb = null;
             do {
                 // Poll 1 block from PBD
@@ -100,18 +101,17 @@ public class ExportRunner implements Runnable {
                 if (pb == null) {
                     break;
                 }
-                if (LOG.isDebugEnabled()) {
-                    LOG.debug(this + " polled " + pb);
-                }
 
                 // Process and discard polled block
                 processBlock(pb);
+                pb.release();
                 pb = null;
 
             } while (true);
         }
         catch (Exception e) {
-            LOG.error(this + " failed, exiting after " + m_count + " rows", e);
+            LOG.error(this + " failed, exiting after " + m_count + " rows");
+            e.printStackTrace();
             lastError = e;
         }
         finally {
@@ -134,7 +134,7 @@ public class ExportRunner implements Runnable {
 
     @Override
     public String toString() {
-        return this.getClass().getSimpleName() + ":" + m_cfg.stream_name + ":" + m_partition;
+        return this.getClass().getSimpleName() + ":" + m_cfg.stream_name + ":" + m_cfg.partition;
     }
 
     private PollBlock pollPersistentDeque() {
@@ -153,22 +153,21 @@ public class ExportRunner implements Runnable {
             }
         }
         catch (Exception e) {
-            LOG.error("Failed to poll from persistent binary deque", e);
+            LOG.error("Failed to poll from persistent binary deque");
+            e.printStackTrace();
         }
         return block;
     }
 
     private boolean canPoll() {
-        return !Thread.currentThread().isInterrupted();
+        return !Thread.currentThread().isInterrupted()
+                && !(m_cfg.count > 0 && m_count >= m_cfg.count);
     }
 
     private void processBlock(PollBlock block) throws Exception {
         int backoffQuantity = 10 + (int)(10 * ThreadLocalRandom.current().nextDouble());
 
-        if (m_skipRows > 0 && (m_skip + block.m_count < m_skipRows)) {
-            if (LOG.isDebugEnabled()) {
-                LOG.debug(this + " skipping block " + block);
-            }
+        if (m_cfg.skip > 0 && (m_skip + block.m_count < m_cfg.skip)) {
             m_skip += block.m_count;
             return;
         }
@@ -209,23 +208,17 @@ public class ExportRunner implements Runnable {
 
                         // Set the new schema used to decode rows.
                         ExportRowSchema newSchema = block.m_entry.getExtraHeader();
-                        if (LOG.isDebugEnabled()) {
-                            LOG.debug(this + " sets schema to: " + newSchema);
-                        }
                         edb.setExportRowSchema(newSchema);
                     }
 
                     // Skip rows that need skipping in this block
-                    if (m_skipRows > 0 && m_skip < m_skipRows) {
-                        if (LOG.isDebugEnabled()) {
-                            LOG.debug(this + " skipping 1 row in block " + block);
-                        }
+                    if (m_cfg.skip > 0 && m_skip < m_cfg.skip) {
                         m_skip += 1;
                         continue;
                     }
 
                     // Export row
-                    row = ExportRow.decodeRow(edb.getExportRowSchema(), m_partition,
+                    row = ExportRow.decodeRow(edb.getExportRowSchema(), m_cfg.partition,
                             System.currentTimeMillis(), rowdata);
 
                     if (firstRowOfBlock) {
@@ -234,6 +227,9 @@ public class ExportRunner implements Runnable {
                     }
                     edb.processRow(row);
                     m_count++;
+                    if (m_cfg.count > 0 && m_count == m_cfg.count) {
+                        break;
+                    }
                 }
 
                 if (row != null) {
@@ -245,9 +241,6 @@ public class ExportRunner implements Runnable {
             }
             catch (RestartBlockException e) {
                 if (!canPoll()) {
-                    if (LOG.isDebugEnabled()) {
-                        LOG.debug(this + " ignores block restart exception when stopping polling.");
-                    }
                     break;
                 }
                 if (e.requestBackoff) {
@@ -264,13 +257,11 @@ public class ExportRunner implements Runnable {
                     throw e;
                 }
                 else if (!canPoll()) {
-                    if (LOG.isDebugEnabled()) {
-                        LOG.debug(this + " ignores exception when stopping polling: ", e);
-                    }
                     break;
                 }
-                else if (LOG.isDebugEnabled()) {
-                    LOG.debug(this + " ignores exception and restarts block: ", e);
+                else {
+                    LOG.info(this + " ignores exception and restarts block: ");
+                    e.printStackTrace();
                 }
                 backoffQuantity = doBackoff(backoffQuantity, block);
             }
@@ -284,11 +275,10 @@ public class ExportRunner implements Runnable {
         int backoff = curBackoff;
         try {
             if (backoff >= BACKOFF_CAP_MS) {
-                logLimitedWarn.log(this + " hits maximum restart backoff on block " + block,
-                        EstTime.currentTimeMillis());
+                LOG.info(this + " hits maximum restart backoff on block " + block);
             }
-            else if (LOG.isDebugEnabled()) {
-                LOG.debug(this + " sleeping " + backoff + " seconds on " + block);
+            else {
+                LOG.info(this + " sleeping " + backoff + " seconds on " + block);
             }
             Thread.sleep(backoff);
         }
@@ -324,16 +314,15 @@ public class ExportRunner implements Runnable {
             m_edb.sourceNoLongerAdvertised(m_ads);
         }
         catch (Exception e) {
-            LOG.error(this + " failed to close decoder", e);
+            LOG.error(this + " failed to close decoder");
+            e.printStackTrace();
         }
         m_edb = null;
     }
 
     synchronized ExportDecoderBase getDecoder(PollBlock block) throws RestartBlockException {
         if (m_edb == null) {
-            if (LOG.isDebugEnabled()) {
-                LOG.debug(this + " found no decoder for block " + block);
-            }
+            LOG.error(this + " found no decoder for block " + block);
             throw new RestartBlockException(true);
         }
         return m_edb;
@@ -343,7 +332,7 @@ public class ExportRunner implements Runnable {
 
         // Create ads
         m_ads = new AdvertisedDataSource(
-                m_partition,
+                m_cfg.partition,
                 m_cfg.stream_name.toUpperCase(),
                 null,
                 System.currentTimeMillis(),
@@ -354,16 +343,36 @@ public class ExportRunner implements Runnable {
                 AdvertisedDataSource.ExportFormat.SEVENDOTX);
 
         m_edb = m_exportClient.constructExportDecoder(m_ads);
-        String nonce = m_cfg.stream_name.toUpperCase() + "_" + m_partition;
+        String nonce = m_cfg.stream_name.toUpperCase() + "_" + m_cfg.partition;
         constructPBD(nonce);
     }
 
     private void constructPBD(String nonce) throws IOException {
         ExportRowSchemaSerializer serializer = new ExportRowSchemaSerializer();
-        m_pbd = PersistentBinaryDeque.builder(nonce, new VoltFile(m_cfg.export_overflow), LOG)
+        m_pbd = PersistentBinaryDeque.builder(nonce, new VoltFile(m_cfg.indir), VOLTLOG)
                 .initialExtraHeader(null, serializer)
                 .compression(true)
                 .deleteExisting(false)
                 .build();
     }
+
+    private ExportSequenceNumberTracker scanForGap() throws IOException {
+        ExportSequenceNumberTracker tracker = new ExportSequenceNumberTracker();
+        m_pbd.scanEntries(new BinaryDequeScanner() {
+            @Override
+            public void scan(BBContainer bbc) {
+                ByteBuffer b = bbc.b();
+                ByteOrder endianness = b.order();
+                b.order(ByteOrder.LITTLE_ENDIAN);
+                final long startSequenceNumber = b.getLong();
+                b.getLong(); // committedSequenceNumber
+                final int tupleCount = b.getInt();
+                b.order(endianness);
+                tracker.addRange(startSequenceNumber, startSequenceNumber + tupleCount - 1);
+            }
+
+        });
+        return tracker;
+    }
+
 }
