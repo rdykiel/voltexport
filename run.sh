@@ -52,17 +52,11 @@ function jars() {
 function run() {
   java -classpath voltexport.jar:$APPCLASSPATH -Dlog4j.configuration=file:$LOG4J \
       org.voltdb.utils.voltexport.VoltExport \
-       --indir=/Users/rdykiel/00-recovery/in/node3/5 \
-       --outdir=/Users/rdykiel/00-recovery/out/node3/5 \
-       --properties=FILE.properties \
-       --onlyscan=false \
-       --count=0 \
-       --stream_name=EVENTS_TO_HBASE \
-       --partition=5
-
-  # optional parameter:
-  #     --skip 0:1000,1:5000
-
+      --indir=/Users/rdykiel/00-recovery/node2_events_to_hbase/0 \
+      --outdir=/Users/rdykiel/00-recovery/out/node2/0 \
+      --properties=FILE.properties \
+      --stream_name=EVENTS_TO_HBASE \
+      --partition=0
 }
 
 function help() {
