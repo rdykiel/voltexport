@@ -52,11 +52,34 @@ function jars() {
 function run() {
   java -classpath voltexport.jar:$APPCLASSPATH -Dlog4j.configuration=file:$LOG4J \
       org.voltdb.utils.voltexport.VoltExport \
-      --indir=/Users/rdykiel/00-recovery/node2_events_to_hbase/0 \
-      --outdir=/Users/rdykiel/00-recovery/out/node2/0 \
+      --indir=/Users/rdykiel/00-recovery/in/Node1_23062022 \
+      --outdir=/Users/rdykiel/00-recovery/out/Node1_23062022 \
       --properties=FILE.properties \
-      --stream_name=EVENTS_TO_HBASE \
-      --partition=0
+      --stream_name=EVENTS_SUMMARY_TO_JDBC \
+      --partition=4 \
+      --onlyscan=true
+}
+
+function scan() {
+  java -classpath voltexport.jar:$APPCLASSPATH -Dlog4j.configuration=file:$LOG4J \
+      org.voltdb.utils.voltexport.VoltExport \
+      --indir=/Users/rdykiel/00-recovery/in/Node${1}_24062022 \
+      --outdir=/Users/rdykiel/00-recovery/out/Node${1}_24062022 \
+      --properties=FILE.properties \
+      --stream_name=$2 \
+      --partition=$3 \
+      --onlyscan=true
+}
+
+function recover() {
+  java -classpath voltexport.jar:$APPCLASSPATH -Dlog4j.configuration=file:$LOG4J \
+      org.voltdb.utils.voltexport.VoltExport \
+      --indir=/Users/rdykiel/00-recovery/in/Node${1}_24062022 \
+      --outdir=/Users/rdykiel/00-recovery/out/Node${1}_24062022 \
+      --properties=FILE.properties \
+      --stream_name=$2 \
+      --partition=$3 \
+      --skip=$4
 }
 
 function help() {
