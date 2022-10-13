@@ -60,26 +60,53 @@ function run() {
       --onlyscan=true
 }
 
+# Generic scan 1 stream/partition
+# Usage: ./run.sh scan full_path_in_out_dir stream_name partition
 function scan() {
   java -classpath voltexport.jar:$APPCLASSPATH -Dlog4j.configuration=file:$LOG4J \
       org.voltdb.utils.voltexport.VoltExport \
-      --indir=/Users/rdykiel/00-recovery/in/Node${1}_24062022 \
-      --outdir=/Users/rdykiel/00-recovery/out/Node${1}_24062022 \
+      --indir=$1 \
+      --outdir=$1 \
       --properties=FILE.properties \
       --stream_name=$2 \
       --partition=$3 \
       --onlyscan=true
 }
 
+# Generic scan all stream/partition, recovers in same directory
+# Usage: ./run.sh scanall full_path_in_out_dir
+function scanall() {
+  java -classpath voltexport.jar:$APPCLASSPATH -Dlog4j.configuration=file:$LOG4J \
+      org.voltdb.utils.voltexport.VoltExport \
+      --indir=$1 \
+      --outdir=$1 \
+      --properties=FILE.properties \
+      --exportall=true \
+      --onlyscan=true
+}
+
+# Generic revover 1 stream/partition
+# Usage: ./run.sh recover full_path_in_out_dir stream_name partition
 function recover() {
   java -classpath voltexport.jar:$APPCLASSPATH -Dlog4j.configuration=file:$LOG4J \
       org.voltdb.utils.voltexport.VoltExport \
-      --indir=/Users/rdykiel/00-recovery/in/Node${1}_24062022 \
-      --outdir=/Users/rdykiel/00-recovery/out/Node${1}_24062022 \
+      --indir=$1 \
+      --outdir=$1 \
       --properties=FILE.properties \
       --stream_name=$2 \
       --partition=$3 \
       --skip=$4
+}
+
+# Generic recover all stream/partition, recovers in same directory
+# Usage: ./run.sh recoverall full_path_in_out_dir
+function recoverall() {
+  java -classpath voltexport.jar:$APPCLASSPATH -Dlog4j.configuration=file:$LOG4J \
+      org.voltdb.utils.voltexport.VoltExport \
+      --indir=$1 \
+      --outdir=$1 \
+      --properties=FILE.properties \
+      --exportall=true
 }
 
 function help() {

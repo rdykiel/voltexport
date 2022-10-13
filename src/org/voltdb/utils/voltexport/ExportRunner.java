@@ -6,6 +6,7 @@ import static org.voltdb.utils.voltexport.VoltExport.VOLTLOG;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadLocalRandom;
@@ -29,7 +30,7 @@ import org.voltdb.utils.PersistentBinaryDeque;
 import org.voltdb.utils.VoltFile;
 import org.voltdb.utils.voltexport.VoltExport.VoltExportConfig;
 
-public class ExportRunner implements Runnable {
+public class ExportRunner implements Callable<Integer> {
     // Create a singleton scheduled thread pool for block processing timeouts
     private static final ScheduledThreadPoolExecutor s_timeoutExecutor =
             CoreUtils.getScheduledThreadPoolExecutor("Block Processing Timeouts", 1, CoreUtils.MEDIUM_STACK_SIZE);
@@ -82,17 +83,20 @@ public class ExportRunner implements Runnable {
     }
 
     @Override
-    public void run() {
+    public Integer call() {
 
         Exception lastError = null;
         try {
-            LOG.info(this + " exporting: skip = " + m_cfg.skip  + ", count = " + m_cfg.count);
+            if (!m_cfg.onlyscan) {
+                LOG.infoFmt("%s exporting: skip = %d, count = %d",
+                        this, m_cfg.skip, m_cfg.count);
+            }
             setup();
 
             m_reader = m_pbd.openForRead("foo");
             ExportSequenceNumberTracker tracker = new ExportSequenceNumberTracker(scanForGap());
-            LOG.info(this + " scanned PBD: " + tracker.toString());
-            if (m_cfg.onlyscan) return;
+            LOG.infoFmt("%s scanned PBD: %s", this, tracker.toString());
+            if (m_cfg.onlyscan) return 0;
 
             PollBlock pb = null;
             do {
@@ -110,7 +114,7 @@ public class ExportRunner implements Runnable {
             } while (true);
         }
         catch (Exception e) {
-            LOG.error(this + " failed, exiting after " + m_count + " rows");
+            LOG.errorFmt(this + "%s failed, exiting after %d rows", this, m_count);
             e.printStackTrace();
             lastError = e;
         }
@@ -121,15 +125,12 @@ public class ExportRunner implements Runnable {
         // Print enough information to let the user resume after a failure
         long total = m_skip + m_count;
         if (lastError == null) {
-            LOG.info(this + " processed " + total + " rows"
-                    + " (skipped = " + m_skip + ", exported = " + m_count + ")"
-                    + ", export COMPLETE");
+            LOG.infoFmt("%s processed %d rows (skipped = %d, exported = %d), export COMPLETE", this, total, m_skip, m_count);
         }
         else {
-            LOG.info(this + " processed " + total + " rows"
-                    + " (skipped = " + m_skip + ", exported = " + m_count + ")"
-                    + ", export INCOMPLETE");
+            LOG.infoFmt("%s processed %d rows (skipped = %d, exported = %d), export INCOMPLETE", this, total, m_skip, m_count);
         }
+        return 0;
     }
 
     @Override

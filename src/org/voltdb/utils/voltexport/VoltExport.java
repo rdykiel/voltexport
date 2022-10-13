@@ -20,9 +20,16 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 import org.apache.commons.lang3.StringUtils;
@@ -51,43 +58,60 @@ public class VoltExport {
     public static final VoltLogger VOLTLOG = new VoltLogger("VOLTEXPORT");
 
     /**
-     * Configuration options.
+     * Configuration options
      */
-    public static class VoltExportConfig extends CLIConfig {
+    public static class VoltExportConfig extends CLIConfig implements Cloneable {
 
         @Option(desc = "input directory, either export_overflow, or location of saved export files")
         String indir = "";
 
-        @Option(desc = "output directory for file export (may be omitted id onlyscan = true")
+        @Option(desc = "output directory for file export (may be omitted if onlyscan = true")
         String outdir = "";
 
         @Option(desc = "Properties file or a string which can be parsed as a properties file, for export target configuration")
-        String properties = "outdir=/tmp/voltexport_out";
+        String properties = "";
 
-        @Option(desc = "stream name to export")
+        @Option(desc = "export all streams/partitions in indir (default false)")
+        boolean exportall = false;
+
+        @Option(desc = "stream name to export, ignored if exportall")
         String stream_name = "";
 
-        @Option(desc = "the partition to export (default 0)")
+        @Option(desc = "the partition to export, ignored if exportall (default 0)")
         int partition;
 
-        @Option(desc = "Number of rows to skip at the beginning (default 0)")
+        @Option(desc = "Number of rows to skip at the beginning, ignored if exportall (default 0)")
         int skip;
 
-        @Option(desc = "Number of rows export after the (optionally) skipped rows (default 0 means export everything)")
+        @Option(desc = "Number of rows export after the (optionally) skipped rows, ignored if exportall (default 0 means export everything)")
         int count;
 
         @Option(desc = "only scan for gaps, default false (skip and count are ignored)")
         boolean onlyscan = false;
 
+        @Option(desc = "the count of exporting threads to use (default 20)")
+        int threads = 20;
+
         @Override
         public void validate() {
             if (StringUtils.isBlank(indir)) exitWithMessageAndUsage("Need full path to export_overflow or files to parse");
             if (StringUtils.isBlank(outdir) && !onlyscan) exitWithMessageAndUsage("Need full path to outdir or files to write");
-            if (StringUtils.isBlank(stream_name)) exitWithMessageAndUsage("Need stream_name for files to parse");
-            if (skip < 0) exitWithMessageAndUsage("skip must be >= 0");
-            if (count < 0) exitWithMessageAndUsage("count must be >= 0");
+            if (!exportall) {
+                if (StringUtils.isBlank(stream_name)) exitWithMessageAndUsage("Need stream_name for files to parse");
+                if (skip < 0) exitWithMessageAndUsage("skip must be >= 0");
+                if (count < 0) exitWithMessageAndUsage("count must be >= 0");
+            }
+            if (threads <= 0) exitWithMessageAndUsage("threads must be > 0");
+        }
+
+        @Override
+        public Object clone() throws CloneNotSupportedException {
+            // shallow copy
+            VoltExportConfig c = (VoltExportConfig)super.clone();
+            return c;
         }
     }
+
     private static VoltExportConfig s_cfg = new VoltExportConfig();
 
     // FIXME: may support different export targets in the future, only FILE is supported for now
@@ -115,7 +139,7 @@ public class VoltExport {
     }
 
     void run() throws IOException {
-        ExportClientBase exportClient = null;
+        ArrayList<ExportClientBase> exportClients = new ArrayList<>();
         try {
             // Set up dummy ExportManager to enable E3 behavior
             ExportManagerInterface.setInstanceForTest(new DummyManager());
@@ -135,38 +159,87 @@ public class VoltExport {
                 s_cfg.exitWithMessageAndUsage("No files in input directory " + indir.getAbsolutePath());
             }
 
-            boolean detected = false;
+            Set<Pair<String, Integer>> topicSet = new HashSet<>();
             for (File data: files) {
                 if (data.getName().endsWith(".pbd")) {
                     // Note: PbdSegmentName#parseFile bugs here
                     Pair<String, Integer> topicPartition = getTopicPartition(data.getName());
-                    if (s_cfg.stream_name.equalsIgnoreCase(topicPartition.getFirst())
-                            && topicPartition.getSecond().intValue() == s_cfg.partition) {
-                        if (!detected) {
+                    if (!s_cfg.exportall) {
+                        if (s_cfg.stream_name.equalsIgnoreCase(topicPartition.getFirst())
+                                && topicPartition.getSecond().intValue() == s_cfg.partition) {
                             LOG.info("Detected stream " + topicPartition.getFirst() + " partition " + topicPartition.getSecond());
+                            topicSet.add(topicPartition);
+                            break;
                         }
-                        detected = true;
+                    }
+                    else {
+                        topicSet.add(topicPartition);
                     }
                 }
             }
-            if (!detected) {
-                LOG.error("No PBD files found for stream " + s_cfg.stream_name + ", partition " + s_cfg.partition);
+            if (topicSet.isEmpty()) {
+                if (s_cfg.exportall) {
+                    LOG.errorFmt("No PBD files found for any stream in directory %s", s_cfg.indir);
+                }
+                else {
+                    LOG.errorFmt("No PBD files found for stream %s, partition %d in directory %s",
+                            s_cfg.stream_name, s_cfg.partition, s_cfg.indir);
+                }
                 System.exit(-1);
             }
 
-            // Create client
-            exportClient = createExportClient(DEFAULT_TARGET);
+            if (!s_cfg.exportall) {
+                // Run an ExportRunner synchronously
+                ExportClientBase exportClient = createExportClient(DEFAULT_TARGET, s_cfg.stream_name, s_cfg.partition);
+                exportClients.add(exportClient);
+                ExportRunner runner = new ExportRunner(s_cfg, exportClient);
+                runner.call();
+            }
+            else {
+                // Run ExportRunners in threadpool
+                ExecutorService executor = Executors.newFixedThreadPool(s_cfg.threads);
+                ArrayList<ExportRunner> tasks = new ArrayList<>();
 
-            // Run an ExportRunner
-            ExportRunner runner = new ExportRunner(s_cfg, exportClient);
-            runner.run();
+                for (Pair<String, Integer> topicPartition : topicSet) {
+                    VoltExportConfig cfg = (VoltExportConfig)s_cfg.clone();
+                    cfg.exportall = false;
+                    cfg.stream_name = topicPartition.getFirst();
+                    cfg.partition = topicPartition.getSecond().intValue();
+                    ExportClientBase exportClient = createExportClient(DEFAULT_TARGET, cfg.stream_name, cfg.partition);
+                    exportClients.add(exportClient);
+                    tasks.add(new ExportRunner(cfg, exportClient));
+                }
+
+                LOG.infoFmt("Starting %d export runners ...", tasks.size());
+                List<Future<Integer>> results = executor.invokeAll(tasks);
+
+                LOG.infoFmt("Waiting for %d export runner completions ...", results.size());
+                executor.shutdown();
+                int minutes = 0;
+                while (!executor.awaitTermination(60, TimeUnit.SECONDS)) {
+                    LOG.infoFmt("... still waiting for %d export completions after %d minutes", results.size(), ++minutes);
+                }
+
+                int exceptions = 0;
+                for (Future<Integer> fut : results) {
+                    try {
+                        fut.get();
+                    }
+                    catch (Exception e) {
+                        exceptions++;
+                    }
+                }
+                if (exceptions > 0) {
+                    LOG.errorFmt("%d export runners encountered exceptions", exceptions);
+                }
+            }
         }
         catch (Exception e) {
             LOG.error("Failed exporting");
             e.printStackTrace();
         }
         finally {
-            if (exportClient != null) {
+            for (ExportClientBase exportClient : exportClients) {
                 try {
                 exportClient.shutdown();
                 }
@@ -176,7 +249,13 @@ public class VoltExport {
                 }
             }
         }
-        LOG.info("Finished exporting stream " + s_cfg.stream_name + ", partition " + s_cfg.partition);
+        if (s_cfg.exportall) {
+            LOG.infoFmt("Finished exporting all streams in directory %s", s_cfg.indir);
+        }
+        else {
+            LOG.infoFmt("Finished exporting stream %s, partition %d in directory %s",
+                    s_cfg.stream_name, s_cfg.partition, s_cfg.indir);
+        }
     }
 
     // Totally inefficient PBD file name parsing
@@ -205,9 +284,9 @@ public class VoltExport {
         return Pair.of(streamName, partition);
     }
 
-    private Properties getProperties(Target target) throws IOException {
+    private Properties getProperties(Target target, String name, int partition) throws IOException {
         Properties properties = new Properties();
-        if (s_cfg.properties == null) {
+        if (StringUtils.isBlank(s_cfg.properties)) {
             LOG.info("No properties specifed for target " + target);
         } else {
             final InputStream in;
@@ -226,22 +305,18 @@ public class VoltExport {
         // Do some property checks and adjustments
         if (target == Target.FILE) {
             // File export, set the nonce to stream_partition
-            String nonce = s_cfg.stream_name.toUpperCase() + "_" + s_cfg.partition;
-            LOG.info("Setting nonce to " + nonce + " for " + target + " export");
+            String nonce = name + "_" + partition;
             properties.put("nonce", nonce);
             properties.put("outdir", s_cfg.outdir);
-            LOG.info("Exporting " + target + " to directory " + properties.getProperty("outdir"));
         }
         return properties;
     }
 
-    private ExportClientBase createExportClient(Target target)
+    private ExportClientBase createExportClient(Target target, String name, int partition)
             throws ClassNotFoundException, Exception {
         ExportClientBase client = target.create();
-        client.configure(getProperties(target));
+        client.configure(getProperties(target, name, partition));
         client.setTargetName(s_cfg.stream_name);
-
-        LOG.info("Created export client " + client.getClass().getName());
         return client;
     }
 

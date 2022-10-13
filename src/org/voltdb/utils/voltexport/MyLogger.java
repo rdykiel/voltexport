@@ -60,7 +60,9 @@ public class MyLogger {
     private void log(Level level, String format, Object... args) {
         log(level, String.format(format, args));
     }
-    private void log(Level level, String msg) {
+
+    // Synchronized to allow logging from multiple threads - not concerned about performance
+    private synchronized void log(Level level, String msg) {
         System.out.print(LOG_DF.format(new Date()));
         System.out.println(String.format(" %s: %s", level, msg));
     }
