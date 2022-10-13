@@ -2,43 +2,32 @@ README instructions for using voltexport tool
 =============================================
 This tool is designed to operate on a VoltDB 9.3.x installation.
 
-It is used to read data from an export_overflow directory and output the data into .csv files in an output directory.
+It is used to read data from an export_overflow directory and output the data into .csv files in an output directory. The input and output directories may be the same.
 
-The included run.sh script allows building the tool, and running it. You must modify the run() function with your specific parameters as explained below.
-
-Overview
---------
-
-For each invocation of the run() function in run.sh, the tool will operate on one stream, and on one partition of that stream. By default, the export_overflow directory contains files for all the streams and all the partitions. On large configurations it may be advisable to separate the files for each stream and each partition in separate directories. Likewise, it may be desirable to separate the output files per stream and per partition in different directories.  
-
-In the examples below we are using this separation principle to demonstrate the tool usage. The source directory contains all export_overflow files for stream EVENTS_TO_HBASE, partition 0. Note the file naming convention allowing identifying the stream and the partition in the file names:
-
-    00-recovery/node2_events_to_hbase/0  
-    ls -lh
-    total 1642144
-    -rw-r--r--@ 1 rdykiel  staff   2.6K Apr 17 01:08 EVENTS_TO_HBASE_0.ad
-    -rw-r--r--@ 1 rdykiel  staff    64M Apr 17 07:38 EVENTS_TO_HBASE_0_0000000001_0000000002.pbd
-    -rw-r--r--@ 1 rdykiel  staff    64M Apr 17 13:07 EVENTS_TO_HBASE_0_0000000003_0000000001.pbd
-    -rw-r--r--@ 1 rdykiel  staff    64M Apr 18 01:52 EVENTS_TO_HBASE_0_0000000004_0000000003.pbd
-    -rw-r--r--@ 1 rdykiel  staff    64M Apr 18 07:59 EVENTS_TO_HBASE_0_0000000005_0000000004.pbd
-    -rw-r--r--@ 1 rdykiel  staff    64M Apr 18 13:36 EVENTS_TO_HBASE_0_0000000006_0000000005.pbd
-    -rw-r--r--@ 1 rdykiel  staff    64M Apr 19 01:44 EVENTS_TO_HBASE_0_0000000007_0000000006.pbd
-    -rw-r--r--@ 1 rdykiel  staff    63M Apr 19 02:49 EVENTS_TO_HBASE_0_0000000008_0000000007.pbd
-    -rw-r--r--@ 1 rdykiel  staff    64M Apr 19 03:45 EVENTS_TO_HBASE_0_0000000009_0000000008.pbd
-    -rw-r--r--@ 1 rdykiel  staff    64M Apr 19 05:01 EVENTS_TO_HBASE_0_0000000010_0000000009.pbd
-    -rw-r--r--@ 1 rdykiel  staff    64M Apr 19 06:48 EVENTS_TO_HBASE_0_0000000011_0000000010.pbd
-    -rw-r--r--@ 1 rdykiel  staff    64M Apr 19 08:29 EVENTS_TO_HBASE_0_0000000012_0000000011.pbd
-    -rw-r--r--@ 1 rdykiel  staff    64M Apr 19 09:54 EVENTS_TO_HBASE_0_0000000013_0000000012.pbd
-    -rw-r--r--@ 1 rdykiel  staff    36M Apr 19 11:36 EVENTS_TO_HBASE_0_0000000014_0000000013.pbd
+The included run.sh script allows building the tool, and running it. You must modify the available functions in run.sh with your specific parameters as explained below.
 
 IMPORTANT: voltexport operation is destructive
 ----------------------------------------------
 
-The voltexport tool operates like VoltDB export, in that once the rows in a file have been completely exported to the csv file, the source ".pbd" file is deleted. At the end of the export operation, only the last file remains:
+The voltexport tool operates like VoltDB export, in that once the rows in a file have been completely exported to the csv file, the source ".pbd" file is deleted, except if it is the last PBD file for this stream/partition. At the end of the export operation, only the last file PBD remains (but all its contents have been exported), e.g.:
 
     -rw-r--r--@ 1 rdykiel  staff    36M Apr 19 11:36 EVENTS_TO_HBASE_0_0000000014_0000000013.pbd
 
-Therefore it is important to **run the voltexport tool on copies of the original export_overflow files.**
+Therefore it is important to **run the voltexport tool on copies of the original export_overflow files, or have a backup of the original export_overflow files.**
+
+Overview
+--------
+
+The main modes of operation of the tool are:
+
+- **Export all streams/partitions**: Export all the stream/partitions found in the export_overflow directory (**--exportall=true**)
+- **Export single stream/partition**: Export only 1 stream and 1 partition found in the export_overflow directory (**--exportall=false**): this is the default option.
+
+For each of the above modes of operation, the **--onlyscan=true** option allows to scan the PBD files and print the range of sequence numbers of the stream/partition(s), without performing the actual export. In this case the operation is non-destructive. The option is **false** by default.
+
+The --onlyscan option enables viewing the range of sequence numbers before performing the actual export:
+
+- In the single stream/partition mode this enables select a precise range of rows to export, using the **--count** and **--skip** options.
 
 Build the tool
 --------------
@@ -46,21 +35,6 @@ Build the tool
 The following command builds the voltexport tool, using the jars found in your VoltDB 9.3.x installation:
 
     ./run.sh jars
-
-Modify the run() function parameters
-------------------------------------
-
-Edit run.sh to modify the following parameters used in the run() function to match your environment and the stream and partition you are exporting:
-
-    function run() {
-        java -classpath voltexport.jar:$APPCLASSPATH -Dlog4j.configuration=file:$LOG4J \
-          org.voltdb.utils.voltexport.VoltExport \
-          --indir=/Users/rdykiel/00-recovery/node2_events_to_hbase/0 \
-          --outdir=/Users/rdykiel/00-recovery/out/node2/0 \
-          --properties=FILE.properties \
-          --stream_name=EVENTS_TO_HBASE \
-          --partition=0
-    }
 
 Optionally modify the FILE.properties file
 ------------------------------------------
@@ -72,70 +46,57 @@ The FILE.properties files contains configuration options to the export client wh
 
 For instance, you might decide you want to include the VoltDB metadata columns, in which case you would set **skipinternals=false**.
 
-Invoke the run() command to export your rows
---------------------------------------------
 
-With the data and setup described above, invoke the run() command to export your rows:
+Select and modify the execution function parameters
+---------------------------------------------------
 
-    ./run.sh run
-    run
-    2022-04-29 13:46:31,484 INFO: Detected stream EVENTS_TO_HBASE partition 0
-    2022-04-29 13:46:31,486 INFO: Setting nonce to EVENTS_TO_HBASE_0 for FILE export
-    2022-04-29 13:46:31,487 INFO: Exporting FILE to directory /Users/rdykiel/00-recovery/out/node2/0
-    2022-04-29 13:46:31,595 INFO: Created export client org.voltdb.exportclient.ExportToFileClient
-    2022-04-29 13:46:31,597 INFO: ExportRunner:EVENTS_TO_HBASE:0 exporting: skip = 0, count = 0
-    WARN: Strict java memory checking is enabled, don't do release builds or performance runs with this enabled. Invoke "ant clean" and "ant -Djmemcheck=NO_MEMCHECK" to disable.
-    WARN: Segment /Users/rdykiel/00-recovery/node2_events_to_hbase/0/EVENTS_TO_HBASE_0_0000000001_0000000002.pbd (final: false), has been recovered but is not in a final state
-    WARN: Segment /Users/rdykiel/00-recovery/node2_events_to_hbase/0/EVENTS_TO_HBASE_0_0000000003_0000000001.pbd (final: false), has been recovered but is not in a final state
-    WARN: Segment /Users/rdykiel/00-recovery/node2_events_to_hbase/0/EVENTS_TO_HBASE_0_0000000004_0000000003.pbd (final: false), has been recovered but is not in a final state
-    WARN: Segment /Users/rdykiel/00-recovery/node2_events_to_hbase/0/EVENTS_TO_HBASE_0_0000000005_0000000004.pbd (final: false), has been recovered but is not in a final state
-    WARN: Segment /Users/rdykiel/00-recovery/node2_events_to_hbase/0/EVENTS_TO_HBASE_0_0000000006_0000000005.pbd (final: false), has been recovered but is not in a final state
-    WARN: Segment /Users/rdykiel/00-recovery/node2_events_to_hbase/0/EVENTS_TO_HBASE_0_0000000007_0000000006.pbd (final: false), has been recovered but is not in a final state
-    WARN: Segment /Users/rdykiel/00-recovery/node2_events_to_hbase/0/EVENTS_TO_HBASE_0_0000000008_0000000007.pbd (final: false), has been recovered but is not in a final state
-    WARN: Segment /Users/rdykiel/00-recovery/node2_events_to_hbase/0/EVENTS_TO_HBASE_0_0000000009_0000000008.pbd (final: false), has been recovered but is not in a final state
-    WARN: Segment /Users/rdykiel/00-recovery/node2_events_to_hbase/0/EVENTS_TO_HBASE_0_0000000010_0000000009.pbd (final: false), has been recovered but is not in a final state
-    WARN: Segment /Users/rdykiel/00-recovery/node2_events_to_hbase/0/EVENTS_TO_HBASE_0_0000000011_0000000010.pbd (final: false), has been recovered but is not in a final state
-    WARN: Segment /Users/rdykiel/00-recovery/node2_events_to_hbase/0/EVENTS_TO_HBASE_0_0000000012_0000000011.pbd (final: false), has been recovered but is not in a final state
-    WARN: Segment /Users/rdykiel/00-recovery/node2_events_to_hbase/0/EVENTS_TO_HBASE_0_0000000013_0000000012.pbd (final: false), has been recovered but is not in a final state
-    WARN: Segment /Users/rdykiel/00-recovery/node2_events_to_hbase/0/EVENTS_TO_HBASE_0_0000000014_0000000013.pbd (final: false), has been recovered but is not in a final state
-    2022-04-29 13:46:35,399 INFO: ExportRunner:EVENTS_TO_HBASE:0 scanned PBD: [355197412, 377778022]
-    2022-04-29 13:47:21,164 INFO: ExportRunner:EVENTS_TO_HBASE:0 processed 22580611 rows (skipped = 0, exported = 22580611), export COMPLETE
-    2022-04-29 13:47:21,166 INFO: Finished exporting stream EVENTS_TO_HBASE, partition 0
+The run.sh contains 4 generic execution functions that you can either use as-is or modify with additional passed-in parameters:
 
-As explained above the operation was destructive of your source files:
+- **scan()**: generic scan of 1 stream/partition
+- **scanall()**: generic scan of all stream/partitions
+- **recover()**: generic recover (export) of 1 stream/partition
+- **recoverall()**: generic recover (export) of all stream/partitions
 
-    ls -lh node2_events_to_hbase/0
-    total 73976
-    -rw-r--r--@ 1 rdykiel  staff   2.6K Apr 17 01:08 EVENTS_TO_HBASE_0.ad
-    -rw-r--r--@ 1 rdykiel  staff    36M Apr 19 11:36 EVENTS_TO_HBASE_0_0000000014_0000000013.pbd
+By default these functions read and write in the same directory (**--indir == --outdir**). You can modify the command to accept an additional parameter, e.g. specifying an **--outdir** different from **--indir**.
 
-The outdir contains the rows exported as a csv file:
+You can also create your own customized execution function.
 
-    ls -lh out/node2/0
-    total 5801464
-    -rw-r--r--  1 rdykiel  staff   2.8G Apr 29 13:47 EVENTS_TO_HBASE_0-3765310264681971711-EVENTS_TO_HBASE-20220429174631.csv
+Scan execution and output
+-------------------------
 
-Option --onlyscan
------------------
+The following are examples of **scan()** or **scanall()** invocations:
 
-Before actually exporting the rows, the run() command can be invoked with the **--onlyscan=true** option as follows:
+    ./run.sh scan /home/volt_dl_node1/voltdb_dl/voltdbroot/export_overflow EVENTS_TO_HDFS 5
+    ./run.sh scanall /home/volt_dl_node1/voltdb_dl/voltdbroot/export_overflow
 
-    function run() {
-        java -classpath voltexport.jar:$APPCLASSPATH -Dlog4j.configuration=file:$LOG4J \
-        org.voltdb.utils.voltexport.VoltExport \
-        --indir=/Users/rdykiel/00-recovery/node2_events_to_hbase/0 \
-        --outdir=/Users/rdykiel/00-recovery/out/node2/0 \
-        --properties=FILE.properties \
-        --stream_name=EVENTS_TO_HBASE \
-        --partition=0 \
-        --onlyscan=true
-    }
+The first example scans only stream EVENTS_TO_HDFS partition 5.
 
-In this case, the tool execution stops after this line:
+The second example scans all streams and partitions in the export_overflow.
 
-    2022-04-29 13:46:35,399 INFO: ExportRunner:EVENTS_TO_HBASE:0 scanned PBD: [355197412, 377778022]
+The output of **scan()** or **scanall()** prints the range of sequence numbers of the rows present in the PBD files for each of the selected stream/partitions, e.g.:
 
-No rows are exported, and no files are deleted. This option may be useful to determine the set of rows that the source files contain, and possibly to adjust the span of exported rows as explained below.
+    2022-10-12 15:27:35,624 INFO: ExportRunner:EVENTS_SUMMARY_DAY_TO_JDBC:5 scanned PBD: [25700250, 26340461]
+    2022-10-12 15:27:35,751 INFO: ExportRunner:EVENTS_TO_HDFS:5 scanned PBD: [1, 11180]
+
+The tool exits after displaying the scan results, without performing actual export nor modifying the original files. The scan output may also show 'gaps' in the sequence numbers.
+
+Recover execution and output
+----------------------------
+
+The following are examples of **recover()** or **recoverall()** invocations:
+
+    ./run.sh recover /home/volt_dl_node1/voltdb_dl/voltdbroot/export_overflow EVENTS_TO_HDFS 5
+    ./run.sh recoverall /home/volt_dl_node1/voltdb_dl/voltdbroot/export_overflow
+
+The first example exports only stream EVENTS_TO_HDFS partition 5.
+
+The second example exports all streams and partitions in the export_overflow.
+
+The output of **recover()** or **recoverall()** prints the range of sequence numbers of the rows present in the PBD files, but also goes on exporting the selected stream/partitions. The successful export of a stream/partition produces an output like below:
+
+    2022-10-12 15:28:54,287 INFO: ExportRunner:EVENTS_TO_HDFS:5 processed 11180 rows (skipped = 0, exported = 11180), export COMPLETE
+
+In case errors are encountered in the export, that line would end with an **export INCOMPLETE** message.
 
 Options --skip and --count
 --------------------------
@@ -145,12 +106,12 @@ These options are useful after a run with **--onlyscan=true** to select more pre
     function run() {
         java -classpath voltexport.jar:$APPCLASSPATH -Dlog4j.configuration=file:$LOG4J \
         org.voltdb.utils.voltexport.VoltExport \
-        --indir=/Users/rdykiel/00-recovery/node2_events_to_hbase/0 \
-        --outdir=/Users/rdykiel/00-recovery/out/node2/0 \
+        --indir=/home/volt_dl_node1/voltdb_dl/voltdbroot/export_overflow \
+        --outdir=/home/volt_dl_node1/voltdb_dl/voltdbroot/export_overflow \
         --properties=FILE.properties \
         --stream_name=EVENTS_TO_HBASE \
         --partition=0 \
-        --onlyscan=true \
+        --onlyscan=false \
         --skip=150 \
         --count=500
     }

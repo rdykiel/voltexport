@@ -48,18 +48,6 @@ function jars() {
     jar cf voltexport.jar -C src org
 }
 
-
-function run() {
-  java -classpath voltexport.jar:$APPCLASSPATH -Dlog4j.configuration=file:$LOG4J \
-      org.voltdb.utils.voltexport.VoltExport \
-      --indir=/Users/rdykiel/00-recovery/in/Node1_23062022 \
-      --outdir=/Users/rdykiel/00-recovery/out/Node1_23062022 \
-      --properties=FILE.properties \
-      --stream_name=EVENTS_SUMMARY_TO_JDBC \
-      --partition=4 \
-      --onlyscan=true
-}
-
 # Generic scan 1 stream/partition
 # Usage: ./run.sh scan full_path_in_out_dir stream_name partition
 function scan() {
