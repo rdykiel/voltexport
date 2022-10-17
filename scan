@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+
+APPNAME="scan"
+
+# find voltdb binaries in either installation or distribution directory.
+if [ -n "$(which voltdb 2> /dev/null)" ]; then
+    VOLTDB_BIN=$(dirname "$(which voltdb)")
+else
+    VOLTDB_BIN="$(dirname $(dirname $(dirname $(pwd))))/bin"
+    echo "The VoltDB scripts are not in your PATH."
+    echo "For ease of use, add the VoltDB bin directory: "
+    echo
+    echo $VOLTDB_BIN
+    echo
+    echo "to your PATH."
+    echo
+fi
+
+# call script to set up paths, including
+# java classpaths and binary paths
+source $VOLTDB_BIN/voltenv
+
+VOLTDB="$VOLTDB_BIN/voltdb"
+LOG4J="$VOLTDB_VOLTDB/log4j.xml"
+HOST="localhost"
+
+function scan() {
+  java -classpath voltexport.jar:$APPCLASSPATH -Dlog4j.configuration=file:$LOG4J \
+      org.voltdb.utils.voltexport.VoltExport \
+      --properties=FILE.properties \
+      --onlyscan=true \
+      --nousage=true \
+      $@
+}
+
+function help() {
+echo "
+Scans an export overflow directory to display the sequence numbers of one streams/partition found in that directory.
+
+Usage: scan [parameters]
+
+Parameters:
+  indir:        full path to export_overflow directory, e.g.
+                --indir=/home/test/voltdbroot/export_overflow
+
+  stream_name:  name of stream to scan, e.g.:
+                --stream=SOURCE003
+
+  partition:    partition to scan (default=0), e.g.:
+                --partition=5
+"
+}
+
+# Simple wrap of voltexport
+if [[ "$@" == "--help" || -z "$@" ]]; then
+  help
+else
+  scan $@
+fi

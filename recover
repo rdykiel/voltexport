@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+
+APPNAME="recover"
+
+# find voltdb binaries in either installation or distribution directory.
+if [ -n "$(which voltdb 2> /dev/null)" ]; then
+    VOLTDB_BIN=$(dirname "$(which voltdb)")
+else
+    VOLTDB_BIN="$(dirname $(dirname $(dirname $(pwd))))/bin"
+    echo "The VoltDB scripts are not in your PATH."
+    echo "For ease of use, add the VoltDB bin directory: "
+    echo
+    echo $VOLTDB_BIN
+    echo
+    echo "to your PATH."
+    echo
+fi
+
+# call script to set up paths, including
+# java classpaths and binary paths
+source $VOLTDB_BIN/voltenv
+
+VOLTDB="$VOLTDB_BIN/voltdb"
+LOG4J="$VOLTDB_VOLTDB/log4j.xml"
+HOST="localhost"
+
+function recover() {
+  java -classpath voltexport.jar:$APPCLASSPATH -Dlog4j.configuration=file:$LOG4J \
+      org.voltdb.utils.voltexport.VoltExport \
+      --properties=FILE.properties \
+      --nousage=true \
+      $@
+}
+
+function help() {
+echo "
+Scans an export overflow directory to export one streams/partition found in that directory.
+By default exports in the same directory unless --outdir is provided.
+
+Usage: recover [parameters]
+
+Parameters:
+  indir:        full path to export_overflow directory, e.g.
+                --indir=/home/test/voltdbroot/export_overflow
+
+  outdir:       full path to an output directory, e.g
+                --outdir=/home/test/voltdbroot/export_overflow
+                default value = --indir
+
+  stream_name:  name of stream to recover, e.g.:
+                --stream=SOURCE003
+
+  partition:    partition to recover (default=0), e.g.:
+                --partition=5
+
+  skip:         number of rows to skip from the beginning of the
+                stream (default 0)
+
+  count:        number of rows to export after those skipped (default all)
+"
+}
+
+# Simple wrap of voltexport
+if [[ "$@" == "--help" || -z "$@" ]]; then
+  help
+else
+  recover $@
+fi

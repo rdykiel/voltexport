@@ -65,7 +65,7 @@ public class VoltExport {
         @Option(desc = "input directory, either export_overflow, or location of saved export files")
         String indir = "";
 
-        @Option(desc = "output directory for file export (may be omitted if onlyscan = true")
+        @Option(desc = "output directory for file export (may be omitted if onlyscan = true or exportall is false")
         String outdir = "";
 
         @Option(desc = "Properties file or a string which can be parsed as a properties file, for export target configuration")
@@ -92,16 +92,22 @@ public class VoltExport {
         @Option(desc = "the count of exporting threads to use (default 20)")
         int threads = 20;
 
-        @Override
+        @Option(desc = "do not print usage on error (default = false), used for bash encapsulation")
+        boolean nousage = false;
+
+       @Override
         public void validate() {
-            if (StringUtils.isBlank(indir)) exitWithMessageAndUsage("Need full path to export_overflow or files to parse");
-            if (StringUtils.isBlank(outdir) && !onlyscan) exitWithMessageAndUsage("Need full path to outdir or files to write");
-            if (!exportall) {
-                if (StringUtils.isBlank(stream_name)) exitWithMessageAndUsage("Need stream_name for files to parse");
-                if (skip < 0) exitWithMessageAndUsage("skip must be >= 0");
-                if (count < 0) exitWithMessageAndUsage("count must be >= 0");
+            if (StringUtils.isBlank(indir)) exitWithMessage("Need full path to export_overflow or files to parse");
+            if (StringUtils.isBlank(outdir)) {
+                if (!onlyscan) LOG.info("Exporting to same input directory ...");
+                outdir = indir;
             }
-            if (threads <= 0) exitWithMessageAndUsage("threads must be > 0");
+            if (!exportall) {
+                if (StringUtils.isBlank(stream_name)) exitWithMessage("Need stream_name for files to parse");
+                if (skip < 0) exitWithMessage("skip must be >= 0");
+                if (count < 0) exitWithMessage("count must be >= 0");
+            }
+            if (threads <= 0) exitWithMessage("threads must be > 0");
         }
 
         @Override
@@ -109,6 +115,14 @@ public class VoltExport {
             // shallow copy
             VoltExportConfig c = (VoltExportConfig)super.clone();
             return c;
+        }
+
+        public void exitWithMessage(String msg) {
+            System.err.println(msg);
+            if (!nousage) {
+                printUsage();
+            }
+            System.exit(-1);
         }
     }
 
@@ -150,13 +164,13 @@ public class VoltExport {
             // Check directories
             File indir = new File(s_cfg.indir);
             if (!indir.canRead()) {
-                s_cfg.exitWithMessageAndUsage("Cannot read input directory " + indir.getAbsolutePath());
+                s_cfg.exitWithMessage("Cannot read input directory " + indir.getAbsolutePath());
             }
 
             // Parse input directory to identify streams and partitions
             File files[] = indir.listFiles();
             if (files == null || files.length == 0) {
-                s_cfg.exitWithMessageAndUsage("No files in input directory " + indir.getAbsolutePath());
+                s_cfg.exitWithMessage("No files in input directory " + indir.getAbsolutePath());
             }
 
             Set<Pair<String, Integer>> topicSet = new HashSet<>();
