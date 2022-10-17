@@ -1,3 +1,19 @@
+/* This file is part of VoltDB.
+ * Copyright (C) 2008-2022 VoltDB Inc.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with VoltDB.  If not, see <http://www.gnu.org/licenses/>.
+ */
 package org.voltdb.utils.voltexport;
 
 import static org.voltdb.utils.voltexport.VoltExport.LOG;
@@ -30,7 +46,7 @@ import org.voltdb.utils.PersistentBinaryDeque;
 import org.voltdb.utils.VoltFile;
 import org.voltdb.utils.voltexport.VoltExport.VoltExportConfig;
 
-public class ExportRunner implements Callable<Integer> {
+public class ExportRunner implements Callable<VoltExportResult> {
     // Create a singleton scheduled thread pool for block processing timeouts
     private static final ScheduledThreadPoolExecutor s_timeoutExecutor =
             CoreUtils.getScheduledThreadPoolExecutor("Block Processing Timeouts", 1, CoreUtils.MEDIUM_STACK_SIZE);
@@ -83,8 +99,9 @@ public class ExportRunner implements Callable<Integer> {
     }
 
     @Override
-    public Integer call() {
+    public VoltExportResult call() {
 
+        ExportSequenceNumberTracker tracker = null;
         Exception lastError = null;
         try {
             if (!m_cfg.onlyscan) {
@@ -94,9 +111,9 @@ public class ExportRunner implements Callable<Integer> {
             setup();
 
             m_reader = m_pbd.openForRead("foo");
-            ExportSequenceNumberTracker tracker = new ExportSequenceNumberTracker(scanForGap());
+            tracker = new ExportSequenceNumberTracker(scanForGap());
             LOG.infoFmt("%s scanned PBD: %s", this, tracker.toString());
-            if (m_cfg.onlyscan) return 0;
+            if (m_cfg.onlyscan) return new VoltExportResult(true, tracker, m_cfg.stream_name, m_cfg.partition);
 
             PollBlock pb = null;
             do {
@@ -126,11 +143,12 @@ public class ExportRunner implements Callable<Integer> {
         long total = m_skip + m_count;
         if (lastError == null) {
             LOG.infoFmt("%s processed %d rows (skipped = %d, exported = %d), export COMPLETE", this, total, m_skip, m_count);
+            return new VoltExportResult(true, tracker, m_cfg.stream_name, m_cfg.partition);
         }
         else {
             LOG.infoFmt("%s processed %d rows (skipped = %d, exported = %d), export INCOMPLETE", this, total, m_skip, m_count);
+            return new VoltExportResult(false, tracker, m_cfg.stream_name, m_cfg.partition);
         }
-        return 0;
     }
 
     @Override

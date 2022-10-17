@@ -1,5 +1,5 @@
 /* This file is part of VoltDB.
- * Copyright (C) 2008-2020 VoltDB Inc.
+ * Copyright (C) 2008-2022 VoltDB Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -225,7 +225,7 @@ public class VoltExport {
                 }
 
                 LOG.infoFmt("Starting %d export runners ...", tasks.size());
-                List<Future<Integer>> results = executor.invokeAll(tasks);
+                List<Future<VoltExportResult>> results = executor.invokeAll(tasks);
 
                 LOG.infoFmt("Waiting for %d export runner completions ...", results.size());
                 executor.shutdown();
@@ -235,7 +235,7 @@ public class VoltExport {
                 }
 
                 int exceptions = 0;
-                for (Future<Integer> fut : results) {
+                for (Future<VoltExportResult> fut : results) {
                     try {
                         fut.get();
                     }
