@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+
+APPNAME="stitch"
+
+# find voltdb binaries in either installation or distribution directory.
+if [ -n "$(which voltdb 2> /dev/null)" ]; then
+    VOLTDB_BIN=$(dirname "$(which voltdb)")
+else
+    VOLTDB_BIN="$(dirname $(dirname $(dirname $(pwd))))/bin"
+    echo "The VoltDB scripts are not in your PATH."
+    echo "For ease of use, add the VoltDB bin directory: "
+    echo
+    echo $VOLTDB_BIN
+    echo
+    echo "to your PATH."
+    echo
+fi
+
+# call script to set up paths, including
+# java classpaths and binary paths
+source $VOLTDB_BIN/voltenv
+
+VOLTDB="$VOLTDB_BIN/voltdb"
+LOG4J="$VOLTDB_VOLTDB/log4j.xml"
+HOST="localhost"
+
+function stitch() {
+  java -classpath voltexport.jar:$APPCLASSPATH -Dlog4j.configuration=file:$LOG4J \
+      org.voltdb.utils.voltexport.VoltStitchExport \
+      --properties=FILE.internal.properties \
+      --nousage=true \
+      $@
+}
+
+function help() {
+echo "
+Scans a list of export overflow directories and stitch one streams/partition,
+filling gaps as much as possible, to export in output directory.
+
+Usage: stitch [parameters]
+
+Parameters:
+  indirs:       list of full paths to export overflow directories, e.g.
+                --indir=/home/test/node0/voltdbroot/export_overflow,/home/test/node1/voltdbroot/export_overflow,/home/test/node2/voltdbroot/export_overflow
+
+  outdir:       full path to an output directory, e.g
+                --outdir=/home/test/voltdbroot/export_overflow
+
+  stream_name:  name of stream to stitch, e.g.:
+                --stream=SOURCE003
+
+  partition:    partition to stitch (default=0), e.g.:
+                --partition=5
+"
+}
+
+# Simple wrap of VoltStitchExport
+if [[ "$@" == "--help" || -z "$@" ]]; then
+  help
+else
+  stitch $@
+fi

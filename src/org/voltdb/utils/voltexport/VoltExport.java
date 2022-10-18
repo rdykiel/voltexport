@@ -334,7 +334,7 @@ public class VoltExport {
         return client;
     }
 
-    private static class DummyManager implements ExportManagerInterface {
+    public static class DummyManager implements ExportManagerInterface {
 
         // Pretend we're running E3
         @Override

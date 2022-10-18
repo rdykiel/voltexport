@@ -48,6 +48,13 @@ public class MyLogger {
         log(Level.INFO, format, args);
     }
 
+    void debug(String msg) {
+        log(Level.DEBUG, msg);
+    }
+    void debugFmt(String format, Object... args) {
+        log(Level.DEBUG, format, args);
+    }
+
     void rateLimitedLog(long suppressInterval, Level level, String format, Object... args) {
         long now = System.nanoTime();
         long last = m_lastLogs.getOrDefault(level, 0L);
