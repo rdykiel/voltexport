@@ -28,8 +28,10 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.commons.lang3.StringUtils;
 import org.voltcore.utils.CoreUtils;
 import org.voltcore.utils.DBBPool.BBContainer;
+import org.voltcore.utils.Pair;
 import org.voltdb.export.AdvertisedDataSource;
 import org.voltdb.export.ExportSequenceNumberTracker;
 import org.voltdb.export.StreamBlock;
@@ -62,8 +64,8 @@ public class ExportRunner implements Callable<VoltExportResult> {
     private BinaryDeque<ExportRowSchema> m_pbd;
     private BinaryDequeReader<ExportRowSchema> m_reader;
 
-    private long m_skip = 0;
-    private long m_count = 0;
+    private Pair<Long, Long> m_range = new Pair<>(0L, Long.MAX_VALUE);
+    private long m_count;
 
     // These may be changed by the block timeout logic
     private volatile ExportDecoderBase m_edb;
@@ -104,9 +106,13 @@ public class ExportRunner implements Callable<VoltExportResult> {
         ExportSequenceNumberTracker tracker = null;
         Exception lastError = null;
         try {
+            if (!parseRange()) {
+                LOG.infoFmt("%s processed %d rows (skipped = %d, exported = %d), export INCOMPLETE", this, 0, 0, 0);
+                return new VoltExportResult(false, tracker, m_cfg.stream_name, m_cfg.partition);
+            }
             if (!m_cfg.onlyscan) {
-                LOG.infoFmt("%s exporting: skip = %d, count = %d",
-                        this, m_cfg.skip, m_cfg.count);
+                LOG.infoFmt("%s exporting range = [%d, %d]",
+                        this, m_range.getFirst(), m_range.getSecond());
             }
             setup();
 
@@ -139,14 +145,13 @@ public class ExportRunner implements Callable<VoltExportResult> {
             finalizeDecoder();
         }
 
-        // Print enough information to let the user resume after a failure
-        long total = m_skip + m_count;
+        // Print enough information to let the user resume after a failure - note: no range information shown
         if (lastError == null) {
-            LOG.infoFmt("%s processed %d rows (skipped = %d, exported = %d), export COMPLETE", this, total, m_skip, m_count);
+            LOG.infoFmt("%s exported %d rows, export COMPLETE", this, m_count);
             return new VoltExportResult(true, tracker, m_cfg.stream_name, m_cfg.partition);
         }
         else {
-            LOG.infoFmt("%s processed %d rows (skipped = %d, exported = %d), export INCOMPLETE", this, total, m_skip, m_count);
+            LOG.infoFmt("%s exported %d rows, export INCOMPLETE", this, m_count);
             return new VoltExportResult(false, tracker, m_cfg.stream_name, m_cfg.partition);
         }
     }
@@ -154,6 +159,36 @@ public class ExportRunner implements Callable<VoltExportResult> {
     @Override
     public String toString() {
         return this.getClass().getSimpleName() + ":" + m_cfg.stream_name + ":" + m_cfg.partition;
+    }
+
+    private boolean parseRange() {
+        if (StringUtils.isBlank(m_cfg.range)) {
+            // No range == max range
+            return true;
+        }
+
+        Long start = 0L, end = 0L;
+        try {
+            String[] numbers = m_cfg.range.split(",");
+            if (numbers.length != 2) {
+                throw new IllegalArgumentException("range requires 2 numbers");
+            }
+
+            start = Long.parseLong(numbers[0]);
+            end = Long.parseLong(numbers[1]);
+
+            if (start >= end) {
+                throw new IllegalArgumentException("invalid range");
+            }
+        }
+        catch (Exception e) {
+            LOG.error("Failed to parse the range...");
+            e.printStackTrace();
+            return false;
+        }
+
+        m_range = new Pair<Long, Long>(start, end);
+        return true;
     }
 
     private PollBlock pollPersistentDeque() {
@@ -179,17 +214,11 @@ public class ExportRunner implements Callable<VoltExportResult> {
     }
 
     private boolean canPoll() {
-        return !Thread.currentThread().isInterrupted()
-                && !(m_cfg.count > 0 && m_count >= m_cfg.count);
+        return !Thread.currentThread().isInterrupted();
     }
 
     private void processBlock(PollBlock block) throws Exception {
         int backoffQuantity = 10 + (int)(10 * ThreadLocalRandom.current().nextDouble());
-
-        if (m_cfg.skip > 0 && (m_skip + block.m_count < m_cfg.skip)) {
-            m_skip += block.m_count;
-            return;
-        }
 
         while(canPoll()) {
             m_blockId += 1;
@@ -213,6 +242,7 @@ public class ExportRunner implements Callable<VoltExportResult> {
                 ExportDecoderBase edb = getDecoder(block);
 
                 // Process rows
+                long seqNo = 0L;
                 while (buf.hasRemaining() && canPoll()) {
                     int length = buf.getInt();
                     byte[] rowdata = new byte[length];
@@ -230,10 +260,15 @@ public class ExportRunner implements Callable<VoltExportResult> {
                         edb.setExportRowSchema(newSchema);
                     }
 
-                    // Skip rows that need skipping in this block
-                    if (m_cfg.skip > 0 && m_skip < m_cfg.skip) {
-                        m_skip += 1;
+                    // Get the sequence number of this row
+                    seqNo = seqNo == 0L ? block.m_start : seqNo + 1;
+
+                    // handle the range
+                    if (seqNo < m_range.getFirst().longValue()) {
                         continue;
+                    }
+                    else if (seqNo > m_range.getSecond().longValue()) {
+                        break;
                     }
 
                     // Export row
@@ -246,9 +281,6 @@ public class ExportRunner implements Callable<VoltExportResult> {
                     }
                     edb.processRow(row);
                     m_count++;
-                    if (m_cfg.count > 0 && m_count == m_cfg.count) {
-                        break;
-                    }
                 }
 
                 if (row != null) {

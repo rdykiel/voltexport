@@ -4,7 +4,7 @@ This tool is designed to operate on a VoltDB 9.3.x installation.
 
 It is used to read data from an export_overflow directory and output the data into .csv files in an output directory. The input and output directories may be the same.
 
-The included run.sh script allows building the tool, and running it. You must modify the available functions in run.sh with your specific parameters as explained below.
+The included run.sh script allows building the tool.
 
 IMPORTANT: voltexport operation is destructive
 ----------------------------------------------
@@ -45,10 +45,10 @@ Use the simple bash wrappers
 
 The voltexport directory contains simple bash wrappers for the VoltExport tool:
 
-- **scan**: generic scan of 1 stream/partition
-- **scanall**: generic scan of all stream/partitions
-- **recover**: generic recover (export) of 1 stream/partition
-- **recoverall**: generic recover (export) of all stream/partitions
+- **scan**:         scan of 1 stream/partition
+- **scanall**:      scan of all stream/partitions
+- **recover**:      recover (export) of 1 stream/partition
+- **recoverall**:   recover (export) of all stream/partitions
 
 Enter the command name or invoke it with the **--help** option to see the possible parameters.
 
@@ -90,18 +90,30 @@ The second example exports all streams and partitions in the export_overflow.
 
 The output of **recover** or **recoverall** prints the range of sequence numbers of the rows present in the PBD files, but also goes on exporting the selected stream/partitions. The successful export of a stream/partition produces an output like below:
 
-    2022-10-12 15:28:54,287 INFO: ExportRunner:EVENTS_TO_HDFS:5 processed 11180 rows (skipped = 0, exported = 11180), export COMPLETE
+    2022-10-12 15:28:54,287 INFO: ExportRunner:EVENTS_TO_HDFS:5 processed 11180 rows, export COMPLETE
 
 In case errors are encountered in the export, that line would end with an **export INCOMPLETE** message.
 
-Options --skip and --count
---------------------------
+Select rows to export with the --range option
+---------------------------------------------
 
-These options are useful after a scanning run with **scan** or **scanall** to select more precisely the span of rows that are exported. For instance, the example below will skip 150 rows at the beginning of the source files, and only export 500 rows from there:
+The **--range** options is useful after a scanning run with **scan** or **scanall** to select more precisely the span of rows that are exported. For instance, the example below will recover 202 rows: 101 rows before the gap, 101 rows after the gap:
 
-    ./recover --indir=/home/volt_dl_node1/voltdb_dl/voltdbroot/export_overflow --stream_name=EVENTS_TO_HDFS --partition=5 --skip=150 --count=500
+    ./scan --indir=/tmp/demo1/node1/voltdbroot/export_overflow --stream_name=SOURCE003 --partition=1
 
-The parameters are independent. The default skip value is 0, meaning export from the first row, and the default value for count is 0, meaning export all the rows after the skipped ones.
+    2022-10-19 09:06:16,681 INFO: Detected stream SOURCE003 partition 1
+    2022-10-19 09:06:17,117 INFO: ExportRunner:SOURCE003:1 scanned PBD: [1, 41065] [54137, 76701] [82412, 89688]
+    2022-10-19 09:06:17,118 INFO: Finished exporting stream SOURCE003, partition 1 in directory /tmp/demo1/node1/voltdbroot/export_overflow
+
+    ./recover --indir=/tmp/demo1/node1/voltdbroot/export_overflow --stream_name=SOURCE003 --partition=1 --outdir=/tmp/demo1/out --range=76601,82512
+
+    2022-10-19 09:06:26,088 INFO: Detected stream SOURCE003 partition 1
+    2022-10-19 09:06:26,191 INFO: ExportRunner:SOURCE003:1 exporting range = [76601, 82512]
+    2022-10-19 09:06:26,444 INFO: ExportRunner:SOURCE003:1 scanned PBD: [1, 41065] [54137, 76701] [82412, 89688]
+    2022-10-19 09:06:26,537 INFO: ExportRunner:SOURCE003:1 exported 202 rows, export COMPLETE
+    2022-10-19 09:06:26,538 INFO: Finished exporting stream SOURCE003, partition 1 in directory /tmp/demo1/node1/voltdbroot/export_overflow
+
+The default range value is [0, 9223372036854775807], meaning export all the rows.
 
 Cleaning up the tool artifacts
 ------------------------------

@@ -80,13 +80,10 @@ public class VoltExport {
         @Option(desc = "the partition to export, ignored if exportall (default 0)")
         int partition;
 
-        @Option(desc = "Number of rows to skip at the beginning, ignored if exportall (default 0)")
-        int skip;
+        @Option(desc = "Pair of sequence numbers specifying the range of rows to export (default 1,Long.MAX_VALUE), inclusive range")
+        String range = "";
 
-        @Option(desc = "Number of rows export after the (optionally) skipped rows, ignored if exportall (default 0 means export everything)")
-        int count;
-
-        @Option(desc = "only scan for gaps, default false (skip and count are ignored)")
+        @Option(desc = "only scan for gaps, default false (range is ignored)")
         boolean onlyscan = false;
 
         @Option(desc = "the count of exporting threads to use (default 20)")
@@ -104,8 +101,6 @@ public class VoltExport {
             }
             if (!exportall) {
                 if (StringUtils.isBlank(stream_name)) exitWithMessage("Need stream_name for files to parse");
-                if (skip < 0) exitWithMessage("skip must be >= 0");
-                if (count < 0) exitWithMessage("count must be >= 0");
             }
             if (threads <= 0) exitWithMessage("threads must be > 0");
         }
