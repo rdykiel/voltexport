@@ -25,15 +25,17 @@ import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
-import java.util.TreeMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.lang3.StringUtils;
-import org.voltcore.utils.Pair;
 import org.voltdb.CLIConfig;
-import org.voltdb.e3.E3ExportCoordinator;
 import org.voltdb.export.ExportManagerInterface;
 import org.voltdb.export.ExportSequenceNumberTracker;
 import org.voltdb.exportclient.ExportClientBase;
@@ -46,6 +48,8 @@ import org.voltdb.utils.voltexport.VoltExport.VoltExportConfig;
  * A class that 'stitches' an export stream from multiple nodes and exports the result in csv.
  * <p>
  * Note: restricted to 1 stream/partition, may be extended to all stream/partitions later.
+ * <p>
+ * WARNING - DOES NOT WORK in 9.3.x. Will be finalized on versions supporting topics.
  */
 public class VoltStitchExport {
 
@@ -75,11 +79,15 @@ public class VoltStitchExport {
         @Option(desc = "print debug usage on error (default = false), used for bash encapsulation")
         boolean debug = false;
 
+        @Option(desc = "the count of exporting threads to use (default 20)")
+        int threads = 20;
+
        @Override
         public void validate() {
             if (StringUtils.isBlank(indirs)) exitWithMessage("Need list of export overflow directories");
             if (StringUtils.isBlank(outdir)) exitWithMessage("Need output directory");
             if (StringUtils.isBlank(stream_name)) exitWithMessage("Need stream_name for files to parse");
+            if (threads <= 0) exitWithMessage("threads must be > 0");
         }
 
         @Override
@@ -99,7 +107,6 @@ public class VoltStitchExport {
     }
 
     private static VoltStitchExportConfig s_cfg = new VoltStitchExportConfig();
-    private static final int NO_HOST_ID =  -1;
 
     public static void main(String[] args) throws IOException {
         s_cfg.parse(VoltStitchExport.class.getName(), args);
@@ -133,39 +140,56 @@ public class VoltStitchExport {
                 LOG.infoFmt("Host %d: %s", hostId, trackers.get(hostId));
             }
 
-            // Compute master trackers per host
-            Map<Integer, ExportSequenceNumberTracker> masters = new TreeMap<>();
-            int leaderId = NO_HOST_ID;
+            // Compute master trackers per host - since we have non-empty trackers as input,
+            // the resulting masters shouldn't be empty either
+            TrackerCoordinator tc = new TrackerCoordinator(s_cfg.debug, trackers);
+            Map<Integer, ExportSequenceNumberTracker> masters = tc.getMasterTrackers();
 
-            // HACK - REMOVEME
-            leaderId = 1;
-            masters.put(leaderId, trackers.get(leaderId));
+            assert !masters.isEmpty() : "No master trackers";
+            masters.forEach((k, v) -> LOG.infoFmt("Host %d mastership: %s", k, v));
 
-            for (Integer hostId : trackers.keySet()) {
-                if (!trackers.containsKey(hostId)) {
-                    continue;
-                }
-                else if (hostId == leaderId) {
-                    continue;   // HACKJ - REMOVEME
-                }
+            // Run SegmentsRunner instances in threadpool: export all hosts in parallel
+            ExecutorService executor = Executors.newFixedThreadPool(s_cfg.threads);
+            Properties props = loadProperties();
+            ArrayList<SegmentsRunner> tasks = new ArrayList<>();
+            long totalRows = 0;
 
-                // Make the first host the leader, keep its original tracker as master for this host
-                if (leaderId == NO_HOST_ID) {
-                    leaderId = hostId;
-                    masters.put(hostId, trackers.get(hostId));
-                    continue;
-                }
+            for (Map.Entry<Integer, ExportSequenceNumberTracker> e : masters.entrySet()) {
+                int hostId = e.getKey().intValue();
+                ExportSequenceNumberTracker trk = e.getValue();
 
-                // Get the master tracker for this host
-                LOG.infoFmt("Get master tracker for host %d ...", hostId);
-                Pair<Long, ExportSequenceNumberTracker> trk = new Pair<>(0L, new ExportSequenceNumberTracker());
-                while(trk.getFirst() != ExportSequenceNumberTracker.INFINITE_SEQNO) {
-                    trk = buildMasterTracker(leaderId, hostId, trk.getFirst(), trk.getSecond(), trackers);
-                }
-                masters.put(hostId,  trk.getSecond());
+                assert !trk.isEmpty() : "Empty master tracker for " + hostId;
+                totalRows += trk.sizeInSequence();
+                tasks.add(new SegmentsRunner(hostId, indirs.get(hostId), s_cfg.outdir,
+                        s_cfg.stream_name, s_cfg.partition, trk, props));
             }
 
-            masters.forEach((k, v) -> LOG.infoFmt("Host %d mastership: %s", k, v));
+            LOG.infoFmt("Starting %d segments runners for a total of %d rows to export ...", tasks.size(), totalRows);
+            List<Future<Integer>> results = executor.invokeAll(tasks);
+
+            LOG.infoFmt("Waiting for %d segments runner completions ...", results.size());
+            executor.shutdown();
+            int minutes = 0;
+            while (!executor.awaitTermination(60, TimeUnit.SECONDS)) {
+                LOG.infoFmt("... still waiting for %d segments completions after %d minutes", results.size(), ++minutes);
+            }
+
+            int errors = 0;
+            for (Future<Integer> fut : results) {
+                try {
+                    errors += fut.get().intValue();
+                }
+                catch (Exception e) {
+                    errors++;
+                    e.printStackTrace();
+                }
+            }
+            if (errors > 0) {
+                LOG.errorFmt("Segment runners encountered %d errors", errors);
+            }
+            else {
+                LOG.infoFmt("Success: stitching %d rows of %s:%d COMPLETE", totalRows, s_cfg.stream_name, s_cfg.partition);
+            }
         }
         catch (Exception e) {
             LOG.errorFmt("Failed stitching %s, partition %d", s_cfg.stream_name, s_cfg.partition);
@@ -193,10 +217,10 @@ public class VoltStitchExport {
         ArrayList<ExportClientBase> exportClients = new ArrayList<>();
 
         try {
-            // Build array of export clients, using hostId as the sequence number
-            // (we're just scanning here, not exporting)
+            // Build array of export clients, using hostId for the sequence numbers:
+            // we're just scanning here, not exporting, so no output file gets created
             for (int hostId = 0; hostId < indirs.size(); hostId++) {
-                exportClients.add(createExportClient(hostId));
+                exportClients.add(createExportClient(hostId, hostId));
             }
 
             // Get the trackers of each host in proper sequence
@@ -229,15 +253,25 @@ public class VoltStitchExport {
         return trackers;
     }
 
-    private ExportClientBase createExportClient(int seqNum)
+    private ExportClientBase createExportClient(long startSeq, long endSeq)
             throws ClassNotFoundException, Exception {
         ExportClientBase client = new ExportToFileClient();
-        client.configure(getProperties(seqNum, seqNum));
+        client.configure(getProperties(startSeq, endSeq));
         client.setTargetName(s_cfg.stream_name);
         return client;
     }
 
     private Properties getProperties(long startSeq, long endSeq) throws IOException {
+        Properties properties = loadProperties();
+        // Set the nonce to stream_partition_startSeq_endSeq
+        String nonce = SegmentsRunner.getNonce(s_cfg.stream_name, s_cfg.partition, startSeq, endSeq);
+        properties.put("nonce", nonce);
+        properties.put("outdir", s_cfg.outdir);
+
+        return properties;
+    }
+
+    private Properties loadProperties() throws IOException {
         Properties properties = new Properties();
         if (StringUtils.isBlank(s_cfg.properties)) {
             LOG.info("No properties specified ...");
@@ -254,121 +288,6 @@ public class VoltStitchExport {
                 properties.load(i);
             }
         }
-
-        // Set the nonce to stream_partition_startSeq_endSeq_
-        String nonce = String.format("%s_%d_%d_%d_", s_cfg.stream_name, s_cfg.partition, startSeq, endSeq);
-        properties.put("nonce", nonce);
-        properties.put("outdir", s_cfg.outdir);
-
         return properties;
     }
-
-    /**
-     * Build a 'master' tracker for a host, that fills gaps of a leader host
-     * <p>
-     * Extracted from 9.3.x {@link E3ExportCoordinator}, because evaluation logic changed
-     * in subsequent versions and we want a unique evaluation logic to debug in this tool.
-     * <p>
-     * The tracker is built recursively until we find no more segments to add to the master tracker.
-     *
-     * @param leaderId      the hostId of the leader
-     * @param myId          the hostId of the host we're building the tracker for
-     * @param safePoint     the current safe point being evaluated
-     * @param masterTracker the tracker being built, recursively
-     * @param trackers      the map of trackers per host
-     * @return  <safepoint, masterTracker>
-     */
-    private Pair<Long, ExportSequenceNumberTracker> buildMasterTracker(int leaderId, int myId, long safePoint,
-            ExportSequenceNumberTracker masterTracker, Map<Integer, ExportSequenceNumberTracker> trackers) {
-
-        assert leaderId != myId : "Don't build master tracker for leader";
-        long exportSeqNo = safePoint + 1;
-        ExportSequenceNumberTracker leaderTracker = trackers.get(leaderId);
-        assert leaderTracker != null : "No leader tracker";
-
-        // Get the first gap covering or following this sequence number on the leader
-        Pair<Long, Long> gap = leaderTracker.getFirstGap(exportSeqNo);
-        assert (gap == null || exportSeqNo <= gap.getSecond());
-        if (gap == null || exportSeqNo < (gap.getFirst() - 1)) {
-
-            if (gap == null) {
-                // We have finished building this tracker
-                safePoint = ExportSequenceNumberTracker.INFINITE_SEQNO;
-            } else {
-                safePoint = gap.getFirst() - 1;
-            }
-
-            if (s_cfg.debug) LOG.debugFmt("Leader %d is master until safe point %d", leaderId, safePoint);
-            return new Pair<Long, ExportSequenceNumberTracker>(safePoint, masterTracker);
-        }
-
-        // Find the lowest hostId that can fill the gap
-        assert (gap != null);
-        if (s_cfg.debug) LOG.debugFmt("Leader %d at seqNo %d, hits gap [%d, %d], look for candidate replicas",
-                leaderId, exportSeqNo, gap.getFirst() , gap.getSecond());
-
-        Integer replicaId = NO_HOST_ID;
-        long leaderNextSafePoint = gap.getSecond();
-        long  replicaSafePoint = 0L;
-
-        for (Integer hostId : trackers.keySet()) {
-
-            if (leaderId == hostId.intValue()) {
-                continue;
-            }
-            Pair<Long, Long> rgap = trackers.get(hostId).getFirstGap(exportSeqNo);
-            if (s_cfg.debug) LOG.debugFmt("Evaluating Replica %d,  gap %s, for seqNo %d" + exportSeqNo, hostId, rgap, exportSeqNo);
-            if (rgap != null) {
-                assert (exportSeqNo <= rgap.getSecond());
-            }
-            if (rgap == null || exportSeqNo <= (rgap.getFirst() - 1)) {
-                replicaId = hostId;
-                if (rgap == null) {
-                    // We have finished building this tracker
-                    replicaSafePoint = ExportSequenceNumberTracker.INFINITE_SEQNO;
-                } else {
-                    // The next safe point of the replica is the last before the
-                    // replica gap
-                    replicaSafePoint = rgap.getFirst() -1;
-                }
-                break;
-            }
-            else {
-                // the sequence number must be in the replica's gap
-                assert (rgap.getFirst() <=  exportSeqNo && exportSeqNo <= rgap.getSecond());
-                // memorize the closest replica's safe point
-                long rgapSP = rgap.getSecond();
-                replicaSafePoint = replicaSafePoint == 0 ? rgapSP : Math.min(replicaSafePoint, rgapSP);
-            }
-        }
-
-        // Found replica
-        if (!replicaId.equals(NO_HOST_ID)) {
-            boolean isMasterMe = myId == replicaId.intValue();
-            String localHost = isMasterMe ? " (localHost) " : "";
-            safePoint = Math.min(leaderNextSafePoint, replicaSafePoint);
-
-            if (s_cfg.debug) LOG.debugFmt("Replica %d %s fills gap [%d,%d], until safe point %d",
-                    replicaId, localHost, gap.getFirst(), gap.getSecond(), safePoint);
-
-            if (isMasterMe) {
-                masterTracker.addRange(exportSeqNo, safePoint);
-            }
-            return new Pair<Long, ExportSequenceNumberTracker>(safePoint, masterTracker);
-        }
-
-        // If no replicas were found, the leader is Export Master and the gap will not be filled.
-        // Continue building tracker past the gap, if we're not at the infinite seqNo.
-        safePoint = replicaSafePoint != 0 ? Math.min(leaderNextSafePoint, replicaSafePoint) : leaderNextSafePoint;
-        if (safePoint == ExportSequenceNumberTracker.INFINITE_SEQNO) {
-            // Done
-            return new Pair<Long, ExportSequenceNumberTracker>(safePoint, masterTracker);
-        }
-
-        if (s_cfg.debug) LOG.debugFmt("Leader %d is master for %d, blocked at safe point %d; resume evaluation at %d",
-                leaderId, exportSeqNo, gap.getFirst(), safePoint);
-
-        return buildMasterTracker(leaderId, myId, safePoint, masterTracker, trackers);
-    }
-
 }

@@ -58,5 +58,7 @@ Parameters:
 if [[ "$@" == "--help" || -z "$@" ]]; then
   help
 else
-  stitch $@
+  echo "This command is unsupported on 9.3.x"
+  # FIXME: will only work when ported to versions with topic support
+  # stitch $@
 fi
