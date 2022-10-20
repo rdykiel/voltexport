@@ -1,6 +1,5 @@
 README instructions for using voltexport tools
 ==============================================
-This set of tools is designed to operate on a VoltDB 9.3.x installation.
 
 It is used to read data from an export_overflow directory and output the data into .csv files in an output directory.
 

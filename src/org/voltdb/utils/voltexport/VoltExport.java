@@ -47,10 +47,10 @@ import org.voltdb.export.ExportDataSource.StreamStartAction;
 import org.voltdb.export.ExportManagerInterface;
 import org.voltdb.export.ExportStats;
 import org.voltdb.export.Generation;
+import org.voltdb.export.StreamControlOperation;
 import org.voltdb.exportclient.ExportClientBase;
 import org.voltdb.exportclient.ExportToFileClient;
 import org.voltdb.exportclient.JDBCExportClient;
-import org.voltdb.sysprocs.ExportControl.OperationMode;
 import org.voltdb.utils.StringInputStream;
 
 public class VoltExport {
@@ -151,7 +151,7 @@ public class VoltExport {
         ArrayList<ExportClientBase> exportClients = new ArrayList<>();
         try {
             // Set up dummy ExportManager to enable E3 behavior
-            ExportManagerInterface.setInstanceForTest(new DummyManager());
+            // ExportManagerInterface.setInstanceForTest(new DummyManager());
 
             // Set the root directory of the FILE export client
             ExportToFileClient.TEST_VOLTDB_ROOT = System.getProperty("user.dir");
@@ -163,12 +163,13 @@ public class VoltExport {
             }
 
             // Parse input directory to identify streams and partitions
+            Set<Pair<String, Integer>> topicSet = new HashSet<>();
+            /*
             File files[] = indir.listFiles();
             if (files == null || files.length == 0) {
                 s_cfg.exitWithMessage("No files in input directory " + indir.getAbsolutePath());
             }
 
-            Set<Pair<String, Integer>> topicSet = new HashSet<>();
             for (File data: files) {
                 if (data.getName().endsWith(".pbd")) {
                     // Note: PbdSegmentName#parseFile bugs here
@@ -196,6 +197,7 @@ public class VoltExport {
                 }
                 System.exit(-1);
             }
+            */
 
             if (!s_cfg.exportall) {
                 // Run an ExportRunner synchronously
@@ -372,13 +374,6 @@ public class VoltExport {
         }
 
         @Override
-        public void initialize(CatalogContext catalogContext, List<Pair<Integer, Integer>> localPartitionsToSites,
-                boolean isRejoin) {
-            // TODO Auto-generated method stub
-
-        }
-
-        @Override
         public void startListeners(ClientInterface cif) {
             // TODO Auto-generated method stub
 
@@ -386,19 +381,6 @@ public class VoltExport {
 
         @Override
         public void shutdown() {
-            // TODO Auto-generated method stub
-
-        }
-
-        @Override
-        public void startPolling(CatalogContext catalogContext, StreamStartAction action) {
-            // TODO Auto-generated method stub
-
-        }
-
-        @Override
-        public void updateCatalog(CatalogContext catalogContext, boolean requireCatalogDiffCmdsApplyToEE,
-                boolean requiresNewExportGeneration, List<Pair<Integer, Integer>> localPartitionsToSites) {
             // TODO Auto-generated method stub
 
         }
@@ -413,20 +395,6 @@ public class VoltExport {
         @Override
         public void updateDanglingExportStates(StreamStartAction action,
                 Map<String, Map<Integer, ExportSnapshotTuple>> exportSequenceNumbers) {
-            // TODO Auto-generated method stub
-
-        }
-
-        @Override
-        public void processStreamControl(String exportSource, List<String> exportTargets, OperationMode valueOf,
-                VoltTable results) {
-            // TODO Auto-generated method stub
-
-        }
-
-        @Override
-        public void pushBuffer(int partitionId, String tableName, long startSequenceNumber,
-                long committedSequenceNumber, long tupleCount, long uniqueId, BBContainer buffer) {
             // TODO Auto-generated method stub
 
         }
@@ -470,6 +438,41 @@ public class VoltExport {
 
         @Override
         public void releaseResources(List<Integer> removedPartitions) {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void initialize(CatalogContext catalogContext, Map<Integer, Integer> localPartitionsToSites,
+                boolean isRejoin) {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void startPolling(CatalogContext catalogContext) {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void updateCatalog(CatalogContext catalogContext, boolean requireCatalogDiffCmdsApplyToEE,
+                boolean requiresNewExportGeneration, Map<Integer, Integer> localPartitionsToSites) {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void processExportControl(String exportSource, List<String> exportTargets,
+                StreamControlOperation operation, VoltTable results) {
+            // TODO Auto-generated method stub
+
+        }
+
+        @Override
+        public void pushBuffer(int partitionId, String tableName, long startSequenceNumber,
+                long committedSequenceNumber, long tupleCount, long uniqueId, long committedSpHandle,
+                BBContainer buffer) {
             // TODO Auto-generated method stub
 
         }

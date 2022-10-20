@@ -36,12 +36,10 @@ import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.lang3.StringUtils;
 import org.voltdb.CLIConfig;
-import org.voltdb.export.ExportManagerInterface;
 import org.voltdb.export.ExportSequenceNumberTracker;
 import org.voltdb.exportclient.ExportClientBase;
 import org.voltdb.exportclient.ExportToFileClient;
 import org.voltdb.utils.StringInputStream;
-import org.voltdb.utils.voltexport.VoltExport.DummyManager;
 import org.voltdb.utils.voltexport.VoltExport.VoltExportConfig;
 
 /**
@@ -122,7 +120,7 @@ public class VoltStitchExport {
             }
 
             // Set up dummy ExportManager to enable E3 behavior
-            ExportManagerInterface.setInstanceForTest(new DummyManager());
+            // ExportManagerInterface.setInstanceForTest(new DummyManager());
 
             // Set the root directory of the FILE export client
             ExportToFileClient.TEST_VOLTDB_ROOT = System.getProperty("user.dir");

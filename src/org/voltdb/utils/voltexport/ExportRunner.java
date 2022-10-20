@@ -19,6 +19,7 @@ package org.voltdb.utils.voltexport;
 import static org.voltdb.utils.voltexport.VoltExport.LOG;
 import static org.voltdb.utils.voltexport.VoltExport.VOLTLOG;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -32,6 +33,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.voltcore.utils.CoreUtils;
 import org.voltcore.utils.DBBPool.BBContainer;
 import org.voltcore.utils.Pair;
+import org.voltdb.catalog.Topic;
 import org.voltdb.export.AdvertisedDataSource;
 import org.voltdb.export.ExportSequenceNumberTracker;
 import org.voltdb.export.StreamBlock;
@@ -40,12 +42,12 @@ import org.voltdb.exportclient.ExportDecoderBase;
 import org.voltdb.exportclient.ExportDecoderBase.RestartBlockException;
 import org.voltdb.exportclient.ExportRow;
 import org.voltdb.exportclient.ExportRowSchema;
-import org.voltdb.exportclient.ExportRowSchemaSerializer;
+import org.voltdb.exportclient.PersistedMetadata;
+import org.voltdb.exportclient.PersistedMetadataSerializer;
 import org.voltdb.utils.BinaryDeque;
 import org.voltdb.utils.BinaryDeque.BinaryDequeScanner;
 import org.voltdb.utils.BinaryDequeReader;
 import org.voltdb.utils.PersistentBinaryDeque;
-import org.voltdb.utils.VoltFile;
 import org.voltdb.utils.voltexport.VoltExport.VoltExportConfig;
 
 public class ExportRunner implements Callable<VoltExportResult> {
@@ -61,8 +63,8 @@ public class ExportRunner implements Callable<VoltExportResult> {
     private final ExportClientBase m_exportClient;
 
     private AdvertisedDataSource m_ads;
-    private BinaryDeque<ExportRowSchema> m_pbd;
-    private BinaryDequeReader<ExportRowSchema> m_reader;
+    private BinaryDeque<PersistedMetadata> m_pbd;
+    private BinaryDequeReader<PersistedMetadata> m_reader;
 
     private Pair<Long, Long> m_range = new Pair<>(0L, Long.MAX_VALUE);
     private long m_count;
@@ -73,12 +75,12 @@ public class ExportRunner implements Callable<VoltExportResult> {
     private volatile int m_blockId = 0;
 
     private static class PollBlock {
-        final BinaryDequeReader.Entry<ExportRowSchema> m_entry;
+        final BinaryDequeReader.Entry<PersistedMetadata> m_entry;
         final long m_start;
         final long m_last;
         final long m_count;
 
-        PollBlock(BinaryDequeReader.Entry<ExportRowSchema> entry, long start, long count) {
+        PollBlock(BinaryDequeReader.Entry<PersistedMetadata> entry, long start, long count) {
             m_entry = entry;
             m_start = start;
             m_count = count;
@@ -87,6 +89,10 @@ public class ExportRunner implements Callable<VoltExportResult> {
 
         void release() {
             m_entry.release();
+        }
+
+        public ExportRowSchema getSchema() {
+            return m_entry.getExtraHeader().getSchema();
         }
 
         @Override
@@ -199,7 +205,7 @@ public class ExportRunner implements Callable<VoltExportResult> {
     private PollBlock pollPersistentDeque() {
         PollBlock block = null;
         try {
-            BinaryDequeReader.Entry<ExportRowSchema> entry = m_reader.pollEntry(PersistentBinaryDeque.UNSAFE_CONTAINER_FACTORY);
+            BinaryDequeReader.Entry<PersistedMetadata> entry = m_reader.pollEntry(PersistentBinaryDeque.UNSAFE_CONTAINER_FACTORY);
             if (entry != null) {
                 ByteBuffer b = entry.getData();
                 b.order(ByteOrder.LITTLE_ENDIAN);
@@ -251,18 +257,16 @@ public class ExportRunner implements Callable<VoltExportResult> {
                 // Process rows
                 while (buf.hasRemaining() && canPoll()) {
                     int length = buf.getInt();
-                    byte[] rowdata = new byte[length];
-                    buf.get(rowdata, 0, length);
 
                     // Handle schema change
                     ExportRow schema = edb.getExportRowSchema();
-                    if (schema == null || schema.generation != block.m_entry.getExtraHeader().generation) {
+                    if (schema == null || schema.generation != block.getSchema().generation) {
 
                         // Schema change: must be on start of a block.
                         assert firstRowOfBlock;
 
                         // Set the new schema used to decode rows.
-                        ExportRowSchema newSchema = block.m_entry.getExtraHeader();
+                        ExportRowSchema newSchema = block.getSchema();
                         edb.setExportRowSchema(newSchema);
                     }
 
@@ -278,8 +282,7 @@ public class ExportRunner implements Callable<VoltExportResult> {
                     }
 
                     // Export row
-                    row = ExportRow.decodeRow(edb.getExportRowSchema(), m_cfg.partition,
-                            System.currentTimeMillis(), rowdata);
+                    row = ExportRow.decodeRow(edb.getExportRowSchema(), m_cfg.partition, buf);
 
                     if (firstRowOfBlock) {
                         edb.onBlockStart(row);
@@ -398,26 +401,35 @@ public class ExportRunner implements Callable<VoltExportResult> {
         // Create ads
         m_ads = new AdvertisedDataSource(
                 m_cfg.partition,
-                m_cfg.stream_name.toUpperCase(),
-                null,
-                System.currentTimeMillis(),
-                1L,
-                null,
-                null,
-                null,
-                AdvertisedDataSource.ExportFormat.SEVENDOTX);
+                m_cfg.stream_name.toUpperCase());
 
         m_edb = m_exportClient.constructExportDecoder(m_ads);
         String nonce = m_cfg.stream_name.toUpperCase() + "_" + m_cfg.partition;
-        constructPBD(nonce);
+        constructPBD(m_cfg.indir, nonce, m_cfg.stream_name, m_cfg.partition);
     }
 
-    private void constructPBD(String nonce) throws IOException {
-        ExportRowSchemaSerializer serializer = new ExportRowSchemaSerializer();
-        m_pbd = PersistentBinaryDeque.builder(nonce, new VoltFile(m_cfg.indir), VOLTLOG)
-                .initialExtraHeader(null, serializer)
+    private void constructPBD(String directory, String nonce, String name, int partition) throws IOException {
+        // The PBD can either be for a stream or an opaque topic so either table or topic may be {@code null}
+        // Opaque topics have same name as their source, non-opaque topics may have different names for stream and topic
+        PersistedMetadata metadata = null;
+        PersistedMetadataSerializer serializer = new PersistedMetadataSerializer();
+
+        // HACK - we create the PBD as an opaque topic:
+        // - we want a topic to prevent deleting PBD files
+        // - we don't have a table schema at this point
+        Topic topic = new Topic();
+        topic.setStreamname(name);
+        topic.setRetentionpolicy(0);    // Time
+        topic.setRetentionlimit(Integer.MAX_VALUE);
+        topic.setRetentionunit("yr");   // years
+
+        metadata = new PersistedMetadata(null, topic, partition, 1L, Long.MAX_VALUE);
+
+        m_pbd = PersistentBinaryDeque.builder(nonce, new File(directory), VOLTLOG)
+                .initialExtraHeader(metadata, serializer)
                 .compression(true)
                 .deleteExisting(false)
+                .requiresId(true)
                 .build();
     }
 
@@ -425,15 +437,17 @@ public class ExportRunner implements Callable<VoltExportResult> {
         ExportSequenceNumberTracker tracker = new ExportSequenceNumberTracker();
         m_pbd.scanEntries(new BinaryDequeScanner() {
             @Override
-            public void scan(BBContainer bbc) {
+            public long scan(BBContainer bbc) {
                 ByteBuffer b = bbc.b();
                 ByteOrder endianness = b.order();
                 b.order(ByteOrder.LITTLE_ENDIAN);
                 final long startSequenceNumber = b.getLong();
-                b.getLong(); // committedSequenceNumber
+                b.getLong(); // committed sequence number
                 final int tupleCount = b.getInt();
+                final long endSequenceNumber = startSequenceNumber + tupleCount - 1;
                 b.order(endianness);
-                tracker.addRange(startSequenceNumber, startSequenceNumber + tupleCount - 1);
+                tracker.addRange(startSequenceNumber, endSequenceNumber);
+                return endSequenceNumber;
             }
 
         });
