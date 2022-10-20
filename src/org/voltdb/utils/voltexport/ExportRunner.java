@@ -130,7 +130,12 @@ public class ExportRunner implements Callable<VoltExportResult> {
                 }
 
                 // Process and discard polled block
-                processBlock(pb);
+                // If block incompletely processed, exit without discarding (we hit the end
+                // of the range and we don't want the block release to trigger the deletion of the PBD file)
+                // NOTE: this requires running against a production build that doesn't check for memory leaks
+                if (!processBlock(pb)) {
+                    break;
+                }
                 pb.release();
                 pb = null;
 
@@ -217,9 +222,11 @@ public class ExportRunner implements Callable<VoltExportResult> {
         return !Thread.currentThread().isInterrupted();
     }
 
-    private void processBlock(PollBlock block) throws Exception {
+    // Return true if completely processed, or false if we hit the end of the range
+    private boolean processBlock(PollBlock block) throws Exception {
         int backoffQuantity = 10 + (int)(10 * ThreadLocalRandom.current().nextDouble());
 
+        long seqNo = 0L;
         while(canPoll()) {
             m_blockId += 1;
             int decoderGeneration = m_decoderId;
@@ -242,7 +249,6 @@ public class ExportRunner implements Callable<VoltExportResult> {
                 ExportDecoderBase edb = getDecoder(block);
 
                 // Process rows
-                long seqNo = 0L;
                 while (buf.hasRemaining() && canPoll()) {
                     int length = buf.getInt();
                     byte[] rowdata = new byte[length];
@@ -281,14 +287,19 @@ public class ExportRunner implements Callable<VoltExportResult> {
                     }
                     edb.processRow(row);
                     m_count++;
+
+                    // Catch the last row of the range
+                    if (seqNo == m_range.getSecond().longValue()) {
+                        break;
+                    }
                 }
 
                 if (row != null) {
                     edb.onBlockCompletion(row);
                 }
 
-                // Done with the block
-                return;
+                // Done with the block when we processed all rows
+                return seqNo == block.m_last;
             }
             catch (RestartBlockException e) {
                 if (!canPoll()) {
@@ -320,6 +331,9 @@ public class ExportRunner implements Callable<VoltExportResult> {
                 blockTimeout.cancel(false);
             }
         }
+
+        // Something bad happened
+        return false;
     }
 
     private int doBackoff(int curBackoff, PollBlock block) {
