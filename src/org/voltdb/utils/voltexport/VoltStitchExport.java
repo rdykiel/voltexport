@@ -48,8 +48,6 @@ import org.voltdb.utils.voltexport.VoltExport.VoltExportConfig;
  * A class that 'stitches' an export stream from multiple nodes and exports the result in csv.
  * <p>
  * Note: restricted to 1 stream/partition, may be extended to all stream/partitions later.
- * <p>
- * WARNING - DOES NOT WORK in 9.3.x. Will be finalized on versions supporting topics.
  */
 public class VoltStitchExport {
 
