@@ -1,7 +1,6 @@
 README instructions for using voltexport tools
 ==============================================
-
-It is used to read data from an export_overflow directory and output the data into .csv files in an output directory.
+This set of tools is used to read data from an export_overflow directory and output the data into .csv files in an output directory.
 
 The included run.sh script allows building the tools.
 
