@@ -158,7 +158,6 @@ public class VoltExport {
         ArrayList<ExportClientBase> exportClients = new ArrayList<>();
         try {
             // Set up dummy ExportManager to enable E3 behavior
-            // ExportManagerInterface.setInstanceForTest(new DummyManager());
             VoltDB.resetSingletonsForTest();
             VoltDB.setExportManagerInstance(new DummyManager());
 

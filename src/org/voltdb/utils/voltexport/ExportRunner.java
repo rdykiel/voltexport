@@ -151,7 +151,7 @@ public class ExportRunner implements Callable<VoltExportResult> {
             } while (true);
         }
         catch (Exception e) {
-            LOG.errorFmt(this + "%s failed, exiting after %d rows", this, m_count);
+            LOG.errorFmt("%s failed, exiting after %d rows", this, m_count);
             e.printStackTrace();
             lastError = e;
         }
