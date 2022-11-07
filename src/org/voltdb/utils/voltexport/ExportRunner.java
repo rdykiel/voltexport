@@ -33,7 +33,8 @@ import org.apache.commons.lang3.StringUtils;
 import org.voltcore.utils.CoreUtils;
 import org.voltcore.utils.DBBPool.BBContainer;
 import org.voltcore.utils.Pair;
-import org.voltdb.catalog.Topic;
+import org.voltdb.catalog.Database;
+import org.voltdb.catalog.Table;
 import org.voltdb.export.AdvertisedDataSource;
 import org.voltdb.export.ExportSequenceNumberTracker;
 import org.voltdb.export.StreamBlock;
@@ -61,6 +62,7 @@ public class ExportRunner implements Callable<VoltExportResult> {
 
     private final VoltExportConfig m_cfg;
     private final ExportClientBase m_exportClient;
+    private final Database m_db;
 
     private AdvertisedDataSource m_ads;
     private BinaryDeque<PersistedMetadata> m_pbd;
@@ -101,9 +103,10 @@ public class ExportRunner implements Callable<VoltExportResult> {
         }
     }
 
-    public ExportRunner(VoltExportConfig cfg, ExportClientBase exportClient) {
+    public ExportRunner(VoltExportConfig cfg, ExportClientBase exportClient, Database db) {
         m_cfg = cfg;
         m_exportClient = exportClient;
+        m_db = db;
     }
 
     @Override
@@ -325,7 +328,7 @@ public class ExportRunner implements Callable<VoltExportResult> {
                     break;
                 }
                 else {
-                    LOG.info(this + " ignores exception and restarts block: ");
+                    LOG.infoFmt("%s ignores exception and restarts block: ", this);
                     e.printStackTrace();
                 }
                 backoffQuantity = doBackoff(backoffQuantity, block);
@@ -343,10 +346,10 @@ public class ExportRunner implements Callable<VoltExportResult> {
         int backoff = curBackoff;
         try {
             if (backoff >= BACKOFF_CAP_MS) {
-                LOG.info(this + " hits maximum restart backoff on block " + block);
+                LOG.infoFmt("%s hits maximum restart backoff on block %s", this, block);
             }
             else {
-                LOG.info(this + " sleeping " + backoff + " seconds on " + block);
+                LOG.infoFmt("%s sleeping %d seconds on %s", this, backoff,  block);
             }
             Thread.sleep(backoff);
         }
@@ -362,12 +365,11 @@ public class ExportRunner implements Callable<VoltExportResult> {
 
     private void handleBlockTimeout(PollBlock block, int blockId) {
         if (m_blockId != blockId) {
-            LOG.warn(this + " hit a spurious block timeout on block " + block
-                    + ": expected " + blockId + ", got " + m_blockId);
+            LOG.warnFmt("%s hit a spurious block timeout on block %s: expected %d, got %d", this, block, blockId, m_blockId);
             return;
         }
 
-        LOG.warn(this + " hit a block timeout on block " + block + ", reset decoder");
+        LOG.warnFmt("%s hit a block timeout on block %s, reset decoder", this, block);
         finalizeDecoder();
         createDecoder();
     }
@@ -405,25 +407,21 @@ public class ExportRunner implements Callable<VoltExportResult> {
 
         m_edb = m_exportClient.constructExportDecoder(m_ads);
         String nonce = m_cfg.stream_name.toUpperCase() + "_" + m_cfg.partition;
-        constructPBD(m_cfg.indir, nonce, m_cfg.stream_name, m_cfg.partition);
+
+        constructPBD(ExportFileVisitor.getPathForExportStream(m_cfg.indir, m_cfg.stream_name, m_cfg.partition),
+                nonce, m_cfg.stream_name, m_cfg.partition);
     }
 
     private void constructPBD(String directory, String nonce, String name, int partition) throws IOException {
-        // The PBD can either be for a stream or an opaque topic so either table or topic may be {@code null}
-        // Opaque topics have same name as their source, non-opaque topics may have different names for stream and topic
         PersistedMetadata metadata = null;
         PersistedMetadataSerializer serializer = new PersistedMetadataSerializer();
 
-        // HACK - we create the PBD as an opaque topic:
-        // - we want a topic to prevent deleting PBD files
-        // - we don't have a table schema at this point
-        Topic topic = new Topic();
-        topic.setStreamname(name);
-        topic.setRetentionpolicy(0);    // Time
-        topic.setRetentionlimit(Integer.MAX_VALUE);
-        topic.setRetentionunit("yr");   // years
+        Table table = m_db.getTables().get(name);
+        if (table == null) {
+            throw new IllegalArgumentException("Table not found in catalog");
+        }
 
-        metadata = new PersistedMetadata(null, topic, partition, 1L, Long.MAX_VALUE);
+        metadata = new PersistedMetadata(table, null, partition, 1L, Long.MAX_VALUE);
 
         m_pbd = PersistentBinaryDeque.builder(nonce, new File(directory), VOLTLOG)
                 .initialExtraHeader(metadata, serializer)

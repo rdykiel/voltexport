@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Properties;
 import java.util.concurrent.Callable;
 
+import org.voltdb.catalog.Database;
 import org.voltdb.export.ExportSequenceNumberTracker;
 import org.voltdb.exportclient.ExportClientBase;
 import org.voltdb.exportclient.ExportToFileClient;
@@ -49,9 +50,10 @@ public class SegmentsRunner implements Callable<Integer> {
     private final int m_partition;
     private final ExportSequenceNumberTracker m_segments;
     private final Properties m_props;
+    private final Database m_db;
 
     public SegmentsRunner(int hostId, String inDir, String outDir, String name, int partition,
-            ExportSequenceNumberTracker segments, Properties props) {
+            ExportSequenceNumberTracker segments, Properties props, Database db) {
         m_hostId = hostId;
         m_inDir = inDir;
         m_outDir = outDir;
@@ -59,6 +61,7 @@ public class SegmentsRunner implements Callable<Integer> {
         m_partition = partition;
         m_segments = segments;
         m_props = props;
+        m_db = db;
     }
 
 
@@ -88,7 +91,7 @@ public class SegmentsRunner implements Callable<Integer> {
                 ExportClientBase exportClient = createExportClient(startSeq, endSeq);
                 exportClients.add(exportClient);
 
-                ExportRunner runner = new ExportRunner(cfg, exportClient);
+                ExportRunner runner = new ExportRunner(cfg, exportClient, m_db);
                 VoltExportResult res = runner.call();
                 if (!res.success) {
                     errors += 1;

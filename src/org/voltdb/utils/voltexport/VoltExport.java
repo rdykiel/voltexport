@@ -21,7 +21,6 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -41,7 +40,9 @@ import org.voltdb.CatalogContext;
 import org.voltdb.ClientInterface;
 import org.voltdb.ExportStatsBase.ExportStatsRow;
 import org.voltdb.SnapshotCompletionMonitor.ExportSnapshotTuple;
+import org.voltdb.VoltDB;
 import org.voltdb.VoltTable;
+import org.voltdb.catalog.Database;
 import org.voltdb.client.ProcedureCallback;
 import org.voltdb.export.ExportDataSource.StreamStartAction;
 import org.voltdb.export.ExportManagerInterface;
@@ -51,6 +52,8 @@ import org.voltdb.export.StreamControlOperation;
 import org.voltdb.exportclient.ExportClientBase;
 import org.voltdb.exportclient.ExportToFileClient;
 import org.voltdb.exportclient.JDBCExportClient;
+import org.voltdb.utils.CatalogUtil;
+import org.voltdb.utils.InMemoryJarfile;
 import org.voltdb.utils.StringInputStream;
 
 public class VoltExport {
@@ -67,6 +70,9 @@ public class VoltExport {
 
         @Option(desc = "output directory for file export (may be omitted if onlyscan = true or exportall is false")
         String outdir = "";
+
+        @Option(desc = "catalog file - must be provided")
+        String catalog = "";
 
         @Option(desc = "Properties file or a string which can be parsed as a properties file, for export target configuration")
         String properties = "";
@@ -95,6 +101,7 @@ public class VoltExport {
        @Override
         public void validate() {
             if (StringUtils.isBlank(indir)) exitWithMessage("Need full path to export_overflow or files to parse");
+            if (StringUtils.isBlank(catalog)) exitWithMessage("Need full path to catalog file");
             if (StringUtils.isBlank(outdir)) {
                 if (!onlyscan) LOG.info("Exporting to same input directory ...");
                 outdir = indir;
@@ -152,6 +159,8 @@ public class VoltExport {
         try {
             // Set up dummy ExportManager to enable E3 behavior
             // ExportManagerInterface.setInstanceForTest(new DummyManager());
+            VoltDB.resetSingletonsForTest();
+            VoltDB.setExportManagerInstance(new DummyManager());
 
             // Set the root directory of the FILE export client
             ExportToFileClient.TEST_VOLTDB_ROOT = System.getProperty("user.dir");
@@ -162,63 +171,47 @@ public class VoltExport {
                 s_cfg.exitWithMessage("Cannot read input directory " + indir.getAbsolutePath());
             }
 
-            // Parse input directory to identify streams and partitions
-            Set<Pair<String, Integer>> topicSet = new HashSet<>();
-            /*
-            File files[] = indir.listFiles();
-            if (files == null || files.length == 0) {
-                s_cfg.exitWithMessage("No files in input directory " + indir.getAbsolutePath());
+            // Get database from catalog
+            Database db = getDatabase();
+            if (db == null) {
+                s_cfg.exitWithMessage("No database in catalog " + s_cfg.catalog);
             }
 
-            for (File data: files) {
-                if (data.getName().endsWith(".pbd")) {
-                    // Note: PbdSegmentName#parseFile bugs here
-                    Pair<String, Integer> topicPartition = getTopicPartition(data.getName());
-                    if (!s_cfg.exportall) {
-                        if (s_cfg.stream_name.equalsIgnoreCase(topicPartition.getFirst())
-                                && topicPartition.getSecond().intValue() == s_cfg.partition) {
-                            LOG.info("Detected stream " + topicPartition.getFirst() + " partition " + topicPartition.getSecond());
-                            topicSet.add(topicPartition);
-                            break;
-                        }
-                    }
-                    else {
-                        topicSet.add(topicPartition);
-                    }
-                }
-            }
-            if (topicSet.isEmpty()) {
-                if (s_cfg.exportall) {
-                    LOG.errorFmt("No PBD files found for any stream in directory %s", s_cfg.indir);
-                }
-                else {
+            // Parse input directory to identify streams and partitions
+            Set<Pair<String, Integer>> streamSet = new ExportFileVisitor(s_cfg.indir, db).visit();
+
+            // Run exports
+            if (!s_cfg.exportall) {
+                if (!streamSet.contains(Pair.of(s_cfg.stream_name, s_cfg.partition))) {
                     LOG.errorFmt("No PBD files found for stream %s, partition %d in directory %s",
                             s_cfg.stream_name, s_cfg.partition, s_cfg.indir);
+                    System.exit(-1);
                 }
-                System.exit(-1);
-            }
-            */
 
-            if (!s_cfg.exportall) {
                 // Run an ExportRunner synchronously
                 ExportClientBase exportClient = createExportClient(DEFAULT_TARGET, s_cfg.stream_name, s_cfg.partition);
                 exportClients.add(exportClient);
-                ExportRunner runner = new ExportRunner(s_cfg, exportClient);
+                ExportRunner runner = new ExportRunner(s_cfg, exportClient, db);
                 runner.call();
             }
             else {
+                if (streamSet.isEmpty()) {
+                    LOG.errorFmt("No PBD files found for any stream in directory %s", s_cfg.indir);
+                    System.exit(-1);
+                }
+
                 // Run ExportRunners in threadpool
                 ExecutorService executor = Executors.newFixedThreadPool(s_cfg.threads);
                 ArrayList<ExportRunner> tasks = new ArrayList<>();
 
-                for (Pair<String, Integer> topicPartition : topicSet) {
+                for (Pair<String, Integer> topicPartition : streamSet) {
                     VoltExportConfig cfg = (VoltExportConfig)s_cfg.clone();
                     cfg.exportall = false;
                     cfg.stream_name = topicPartition.getFirst();
                     cfg.partition = topicPartition.getSecond().intValue();
                     ExportClientBase exportClient = createExportClient(DEFAULT_TARGET, cfg.stream_name, cfg.partition);
                     exportClients.add(exportClient);
-                    tasks.add(new ExportRunner(cfg, exportClient));
+                    tasks.add(new ExportRunner(cfg, exportClient, db));
                 }
 
                 LOG.infoFmt("Starting %d export runners ...", tasks.size());
@@ -269,36 +262,15 @@ public class VoltExport {
         }
     }
 
-    // Totally inefficient PBD file name parsing
-    // Note: I don't know why PbdSegmentName#parseFile bugs here when I run this from the jar
-    // Naming convention for export pdb file: [table name]_[partition]_[segmentId]_[prevId].pdb,
-    private Pair<String, Integer> getTopicPartition(String fileName) {
-
-        String meatloaf = fileName;
-        int lastIndex = meatloaf.lastIndexOf('_');
-        if (lastIndex == -1) {
-            throw new IllegalArgumentException("Bad file name: " + fileName);
-        }
-        meatloaf = meatloaf.substring(0, lastIndex);
-        lastIndex = meatloaf.lastIndexOf('_');
-        if (lastIndex == -1) {
-            throw new IllegalArgumentException("Bad file name: " + fileName);
-        }
-        meatloaf = meatloaf.substring(0, lastIndex);
-        lastIndex = meatloaf.lastIndexOf('_');
-        if (lastIndex == -1) {
-            throw new IllegalArgumentException("Bad file name: " + fileName);
-        }
-        String streamName = meatloaf.substring(0, lastIndex);
-        String partitionStr = meatloaf.substring(lastIndex + 1);
-        Integer partition = Integer.parseInt(partitionStr);
-        return Pair.of(streamName, partition);
+    public static Database getDatabase() throws IOException {
+        InMemoryJarfile imjf = new InMemoryJarfile(s_cfg.catalog);
+        return CatalogUtil.getDatabaseFrom(imjf);
     }
 
     private Properties getProperties(Target target, String name, int partition) throws IOException {
         Properties properties = new Properties();
         if (StringUtils.isBlank(s_cfg.properties)) {
-            LOG.info("No properties specifed for target " + target);
+            LOG.infoFmt("No properties specifed for target %s", target);
         } else {
             final InputStream in;
 
