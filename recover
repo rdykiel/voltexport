@@ -47,6 +47,9 @@ Parameters:
                 --outdir=/home/test/voltdbroot/export_overflow
                 default value = --indir
 
+  catalog:      full path of catalog jar file, e.g.
+                --catalog=/home/test/voltdbroot/config/catalog.jar
+
   stream_name:  name of stream to recover, e.g.:
                 --stream=SOURCE003
 

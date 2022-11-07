@@ -48,6 +48,9 @@ Parameters:
 
   partition:    partition to scan (default=0), e.g.:
                 --partition=5
+
+  catalog:      full path of catalog jar file, e.g.
+                --catalog=/home/test/voltdbroot/config/catalog.jar
 "
 }
 

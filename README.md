@@ -137,7 +137,11 @@ In a K >= 1 multi-node cluster, nodes can go down and rejoin while applications 
 
 Thanks to the k-factor mechanism, the missing rows may be present in the export overflow directory of another node. Using the **scan** and **recover** tools it is possible to manually reconstruct an export of all the rows, by exporting selected ranges from each but this is tedious and error-prone.
 
-The **stitch** tool allows reconstructing a stream/partition from multiple export overflow directories and export the results in an output directory, e.g. in the example below we stitch the stream SOURCE003 partition 3 from 3 export overflow directories:
+The **stitch** tool allows reconstructing a stream/partition from multiple export overflow directories and export the results in an output directory.
+
+**Note**: in versions above 9.3.x, the likelihood of gaps in the export rows is reduced thanks to a background mechanism copying the missing rows from the other nodes when rejoining the cluster. Therefore using stitch may not be needed as it is on 9.3.x.
+
+In the example below we stitch the stream SOURCE003 partition 3 from 3 export overflow directories:
 
     ./stitch --indirs=/tmp/demo2/node0/voltdbroot/export_overflow,/tmp/demo2/node1/voltdbroot/export_overflow,/tmp/demo2/node2/voltdbroot/export_overflow \
       --outdir=/tmp/demo2/out --stream_name=SOURCE003 --partition=3 \
