@@ -276,8 +276,10 @@ public class ExportRunner implements Callable<VoltExportResult> {
                     // Get the sequence number of this row
                     seqNo = seqNo == 0L ? block.m_start : seqNo + 1;
 
-                    // handle the range
+                    // handle the range: always decode rows below the range
                     if (seqNo < m_range.getFirst().longValue()) {
+                        row = ExportRow.decodeRow(edb.getExportRowSchema(), m_cfg.partition, buf);
+                        row = null;
                         continue;
                     }
                     else if (seqNo > m_range.getSecond().longValue()) {
