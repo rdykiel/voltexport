@@ -41,8 +41,11 @@ Scans an export overflow directory to display the sequence numbers of all stream
 Usage: scanall [parameters]
 
 Parameters:
-  indir:  full path to export_overflow directory, e.g
-          --indir=/home/test/voltdbroot/export_overflow
+  indir:    full path to export_overflow directory, e.g
+            --indir=/home/test/voltdbroot/export_overflow
+
+  catalog:  full path of catalog jar file, e.g.
+            --catalog=/home/test/voltdbroot/config/catalog.jar
 "
 }
 

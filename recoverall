@@ -41,12 +41,16 @@ By default exports in the same directory unless --outdir is provided.
 Usage: recoverall [parameters]
 
 Parameters:
-  indir:  full path to export_overflow directory, e.g
-          --indir=/home/test/voltdbroot/export_overflow
+  indir:    full path to export_overflow directory, e.g
+            --indir=/home/test/voltdbroot/export_overflow
 
-  outdir: full path to an output directory, e.g
-          --outdir=/home/test/voltdbroot/export_overflow
-          default value = --indir
+  outdir:   full path to an output directory, e.g
+            --outdir=/home/test/voltdbroot/export_overflow
+            default value = --indir
+
+  catalog:  full path of catalog jar file, e.g.
+            --catalog=/home/test/voltdbroot/config/catalog.jar
+
 "
 }
 

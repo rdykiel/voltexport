@@ -46,6 +46,9 @@ Parameters:
   outdir:       full path to an output directory, e.g
                 --outdir=/home/test/voltdbroot/export_overflow
 
+  catalog:      full path of catalog jar file, e.g.
+                --catalog=/home/test/voltdbroot/config/catalog.jar
+
   stream_name:  name of stream to stitch, e.g.:
                 --stream=SOURCE003
 

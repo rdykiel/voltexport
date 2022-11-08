@@ -32,6 +32,11 @@ import com.google_voltpatches.common.collect.ImmutableMap;
  * <p>
  * Extracted and refactored from 9.3.x {@link E3ExportCoordinator}, because evaluation logic changed
  * in subsequent versions and we want a unique evaluation logic to debug in this tool.
+ * <p>
+ * Note: not optimized in all cases: it may select a leader with gaps and ignore a replica
+ * without gaps: the replica will fill the gaps of the leader but it would have been unnecessary.
+ * We might want to improve this logic and add more testing of edge cases: add a main() function
+ * invoking tests.
  */
 public class TrackerCoordinator {
     private final boolean m_debug;

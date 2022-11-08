@@ -36,10 +36,13 @@ import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.lang3.StringUtils;
 import org.voltdb.CLIConfig;
-import org.voltdb.export.ExportManagerInterface;
+import org.voltdb.VoltDB;
+import org.voltdb.catalog.Database;
 import org.voltdb.export.ExportSequenceNumberTracker;
 import org.voltdb.exportclient.ExportClientBase;
 import org.voltdb.exportclient.ExportToFileClient;
+import org.voltdb.utils.CatalogUtil;
+import org.voltdb.utils.InMemoryJarfile;
 import org.voltdb.utils.StringInputStream;
 import org.voltdb.utils.voltexport.VoltExport.DummyManager;
 import org.voltdb.utils.voltexport.VoltExport.VoltExportConfig;
@@ -61,6 +64,9 @@ public class VoltStitchExport {
 
         @Option(desc = "output directory for file export - required")
         String outdir = "";
+
+        @Option(desc = "catalog file - must be provided")
+        String catalog = "";
 
         @Option(desc = "Properties file or a string which can be parsed as a properties file, for export target configuration")
         String properties = "";
@@ -84,6 +90,7 @@ public class VoltStitchExport {
         public void validate() {
             if (StringUtils.isBlank(indirs)) exitWithMessage("Need list of export overflow directories");
             if (StringUtils.isBlank(outdir)) exitWithMessage("Need output directory");
+            if (StringUtils.isBlank(catalog)) exitWithMessage("Need full path to catalog file");
             if (StringUtils.isBlank(stream_name)) exitWithMessage("Need stream_name for files to parse");
             if (threads <= 0) exitWithMessage("threads must be > 0");
         }
@@ -122,14 +129,21 @@ public class VoltStitchExport {
             }
 
             // Set up dummy ExportManager to enable E3 behavior
-            ExportManagerInterface.setInstanceForTest(new DummyManager());
+            VoltDB.resetSingletonsForTest();
+            VoltDB.setExportManagerInstance(new DummyManager());
 
             // Set the root directory of the FILE export client
             ExportToFileClient.TEST_VOLTDB_ROOT = System.getProperty("user.dir");
 
+            // Get database from catalog
+            Database db = getDatabase();
+            if (db == null) {
+                s_cfg.exitWithMessage("No database in catalog " + s_cfg.catalog);
+            }
+
             // Get original trackers for all hosts. Note, some host may have no trackers
             // FIXME: could optimize with ConcurrentHashMap and parallel scanning
-            Map<Integer, ExportSequenceNumberTracker> trackers = getTrackers(indirs);
+            Map<Integer, ExportSequenceNumberTracker> trackers = getTrackers(indirs, db);
             if (trackers.isEmpty()) {
                 LOG.errorFmt("No PBD files found in directories %s", indirs);
                 return;
@@ -159,7 +173,7 @@ public class VoltStitchExport {
                 assert !trk.isEmpty() : "Empty master tracker for " + hostId;
                 totalRows += trk.sizeInSequence();
                 tasks.add(new SegmentsRunner(hostId, indirs.get(hostId), s_cfg.outdir,
-                        s_cfg.stream_name, s_cfg.partition, trk, props));
+                        s_cfg.stream_name, s_cfg.partition, trk, props, db));
             }
 
             LOG.infoFmt("Starting %d segments runners for a total of %d rows to export ...", tasks.size(), totalRows);
@@ -210,7 +224,7 @@ public class VoltStitchExport {
         return new ArrayList<String>(filtered);
     }
 
-    Map<Integer, ExportSequenceNumberTracker> getTrackers(ArrayList<String> indirs) throws ClassNotFoundException, Exception {
+    Map<Integer, ExportSequenceNumberTracker> getTrackers(ArrayList<String> indirs, Database db) throws ClassNotFoundException, Exception {
         Map<Integer, ExportSequenceNumberTracker> trackers = new HashMap<>();
         ArrayList<ExportClientBase> exportClients = new ArrayList<>();
 
@@ -229,7 +243,7 @@ public class VoltStitchExport {
                 cfg.partition = s_cfg.partition;
                 cfg.onlyscan = true;
 
-                ExportRunner runner = new ExportRunner(cfg, exportClients.get(hostId));
+                ExportRunner runner = new ExportRunner(cfg, exportClients.get(hostId), db);
                 VoltExportResult res = runner.call();
                 if (res.success && !res.tracker.isEmpty()) {
                     trackers.put(hostId, res.tracker);
@@ -249,6 +263,11 @@ public class VoltStitchExport {
         }
 
         return trackers;
+    }
+
+    public static Database getDatabase() throws IOException {
+        InMemoryJarfile imjf = new InMemoryJarfile(s_cfg.catalog);
+        return CatalogUtil.getDatabaseFrom(imjf);
     }
 
     private ExportClientBase createExportClient(long startSeq, long endSeq)

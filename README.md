@@ -1,8 +1,6 @@
 README instructions for using voltexport tools
 ==============================================
-This set of tools is designed to operate on a VoltDB 9.3.x installation.
-
-It is used to read data from an export_overflow directory and output the data into .csv files in an output directory.
+This set of tools is used to read data from an export_overflow directory and output the data into .csv files in an output directory.
 
 The included run.sh script allows building the tools.
 
@@ -24,15 +22,23 @@ The main use cases of the tools are:
 - **Recover**: Export the files found in one export overflow directory: this operation deletes most of the original files and produces the resulting csv files.
 - **Stitch**: Reconstruct an export stream and export it, from multiple export overflow directories, filling gaps when the different nodes are missing export rows.
 
-Developers: build VoltDB 9.3.x
-------------------------------
+The main parameters for these tools are:
 
-In case a developer wants to run the tools, VoltDB 9.3.x must be built without memory checking (a production build is ideal), because the handling of ranges may leak memory in the tool (i.e. not discarding the last polled buffer): this is done in order to avoid deleting the PBD file in case it is no polled completely.
+- **indir**:  Full path of export_overflow directory (or a copy of)
+- **outdir**: Full path of output directory (optional for scan or recover, mandatory for stitch)
+- **catalog**: Full path of catalog jar file: this is a required parameter
+- **stream_name**: the stream or table name when scanning, recovering, or stitching a particular table or stream
+- **partition**: the partition to scan, recover, or stitch
+
+Developers: build VoltDB
+------------------------
+
+In case a developer wants to run the tools, VoltDB must be built without memory checking (a production build is ideal), because the handling of ranges may leak memory in the tool (i.e. not discarding the last polled buffer): this is done in order to avoid deleting the PBD file in case it is no polled completely.
 
 Build the tools
 ---------------
 
-The following command builds the voltexport tools, using the jars found in your VoltDB 9.3.x installation:
+The following command builds the voltexport tools, using the jars found in your VoltDB installation:
 
     ./run.sh jars
 
@@ -69,8 +75,8 @@ Scan execution and output
 
 The following are examples of **scan** or **scanall** invocations:
 
-    ./scan --indir=/home/volt_dl_node1/voltdb_dl/voltdbroot/export_overflow --stream_name=EVENTS_TO_HDFS --partition=5
-    ./scanall --indir=/home/volt_dl_node1/voltdb_dl/voltdbroot/export_overflow
+    ./scan --indir=/home/volt_dl_node1/voltdb_dl/voltdbroot/export_overflow --stream_name=EVENTS_TO_HDFS --partition=5 --catalog=/home/volt_dl_node1/voltdb_dl/voltdbroot/config/catalog.jar
+    ./scanall --indir=/home/volt_dl_node1/voltdb_dl/voltdbroot/export_overflow --catalog=/home/volt_dl_node1/voltdb_dl/voltdbroot/config/catalog.jar
 
 The first example scans only stream EVENTS_TO_HDFS partition 5.
 
@@ -88,8 +94,8 @@ Recover execution and output
 
 The following are examples of **recover** or **recoverall** invocations:
 
-    ./recover --indir=/home/volt_dl_node1/voltdb_dl/voltdbroot/export_overflow --stream_name=EVENTS_TO_HDFS --partition=5
-    ./recoverall --indir-/home/volt_dl_node1/voltdb_dl/voltdbroot/export_overflow
+    ./recover --indir=/home/volt_dl_node1/voltdb_dl/voltdbroot/export_overflow --stream_name=EVENTS_TO_HDFS --partition=5 --catalog=/home/volt_dl_node1/voltdb_dl/voltdbroot/config/catalog.jar
+    ./recoverall --indir-/home/volt_dl_node1/voltdb_dl/voltdbroot/export_overflow --catalog=/home/volt_dl_node1/voltdb_dl/voltdbroot/config/catalog.jar
 
 The first example exports only stream EVENTS_TO_HDFS partition 5.
 
@@ -106,13 +112,13 @@ Select rows to export with the --range option
 
 The **--range** options is useful after a scanning run with **scan** or **scanall** to select more precisely the span of rows that are exported. For instance, the example below will recover 202 rows: 101 rows before the gap, 101 rows after the gap:
 
-    ./scan --indir=/tmp/demo1/node1/voltdbroot/export_overflow --stream_name=SOURCE003 --partition=1
+    ./scan --indir=/tmp/demo1/node1/voltdbroot/export_overflow --stream_name=SOURCE003 --partition=1 --catalog=/tmp/demo1/node1/voltdbroot/config/catalog.jar
 
     2022-10-19 09:06:16,681 INFO: Detected stream SOURCE003 partition 1
     2022-10-19 09:06:17,117 INFO: ExportRunner:SOURCE003:1 scanned PBD: [1, 41065] [54137, 76701] [82412, 89688]
     2022-10-19 09:06:17,118 INFO: Finished exporting stream SOURCE003, partition 1 in directory /tmp/demo1/node1/voltdbroot/export_overflow
 
-    ./recover --indir=/tmp/demo1/node1/voltdbroot/export_overflow --stream_name=SOURCE003 --partition=1 --outdir=/tmp/demo1/out --range=76601,82512
+    ./recover --indir=/tmp/demo1/node1/voltdbroot/export_overflow --stream_name=SOURCE003 --partition=1 --outdir=/tmp/demo1/out --range=76601,82512  --catalog=/tmp/demo1/node1/voltdbroot/config/catalog.jar
 
     2022-10-19 09:06:26,088 INFO: Detected stream SOURCE003 partition 1
     2022-10-19 09:06:26,191 INFO: ExportRunner:SOURCE003:1 exporting range = [76601, 82512]
@@ -131,10 +137,15 @@ In a K >= 1 multi-node cluster, nodes can go down and rejoin while applications 
 
 Thanks to the k-factor mechanism, the missing rows may be present in the export overflow directory of another node. Using the **scan** and **recover** tools it is possible to manually reconstruct an export of all the rows, by exporting selected ranges from each but this is tedious and error-prone.
 
-The **stitch** tool allows reconstructing a stream/partition from multiple export overflow directories and export the results in an output directory, e.g. in the example below we stitch the stream SOURCE003 partition 3 from 3 export overflow directories:
+The **stitch** tool allows reconstructing a stream/partition from multiple export overflow directories and export the results in an output directory.
+
+**Note**: in versions above 9.3.x, the likelihood of gaps in the export rows is reduced thanks to a background mechanism copying the missing rows from the other nodes when rejoining the cluster. Therefore using stitch may not be needed as it is on 9.3.x.
+
+In the example below we stitch the stream SOURCE003 partition 3 from 3 export overflow directories:
 
     ./stitch --indirs=/tmp/demo2/node0/voltdbroot/export_overflow,/tmp/demo2/node1/voltdbroot/export_overflow,/tmp/demo2/node2/voltdbroot/export_overflow \
-      --outdir=/tmp/demo2/out --stream_name=SOURCE003 --partition=3
+      --outdir=/tmp/demo2/out --stream_name=SOURCE003 --partition=3 \
+      --catalog=/tmp/demo2/node0/voltdbroot/config/catalog.jar
 
     2022-10-20 10:53:00,872 INFO: Host 0: /tmp/demo2/node0/voltdbroot/export_overflow
     2022-10-20 10:53:00,872 INFO: Host 1: /tmp/demo2/node1/voltdbroot/export_overflow

@@ -19,6 +19,7 @@ package org.voltdb.utils.voltexport;
 import static org.voltdb.utils.voltexport.VoltExport.LOG;
 import static org.voltdb.utils.voltexport.VoltExport.VOLTLOG;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -32,6 +33,8 @@ import org.apache.commons.lang3.StringUtils;
 import org.voltcore.utils.CoreUtils;
 import org.voltcore.utils.DBBPool.BBContainer;
 import org.voltcore.utils.Pair;
+import org.voltdb.catalog.Database;
+import org.voltdb.catalog.Table;
 import org.voltdb.export.AdvertisedDataSource;
 import org.voltdb.export.ExportSequenceNumberTracker;
 import org.voltdb.export.StreamBlock;
@@ -40,12 +43,12 @@ import org.voltdb.exportclient.ExportDecoderBase;
 import org.voltdb.exportclient.ExportDecoderBase.RestartBlockException;
 import org.voltdb.exportclient.ExportRow;
 import org.voltdb.exportclient.ExportRowSchema;
-import org.voltdb.exportclient.ExportRowSchemaSerializer;
+import org.voltdb.exportclient.PersistedMetadata;
+import org.voltdb.exportclient.PersistedMetadataSerializer;
 import org.voltdb.utils.BinaryDeque;
 import org.voltdb.utils.BinaryDeque.BinaryDequeScanner;
 import org.voltdb.utils.BinaryDequeReader;
 import org.voltdb.utils.PersistentBinaryDeque;
-import org.voltdb.utils.VoltFile;
 import org.voltdb.utils.voltexport.VoltExport.VoltExportConfig;
 
 public class ExportRunner implements Callable<VoltExportResult> {
@@ -59,10 +62,11 @@ public class ExportRunner implements Callable<VoltExportResult> {
 
     private final VoltExportConfig m_cfg;
     private final ExportClientBase m_exportClient;
+    private final Database m_db;
 
     private AdvertisedDataSource m_ads;
-    private BinaryDeque<ExportRowSchema> m_pbd;
-    private BinaryDequeReader<ExportRowSchema> m_reader;
+    private BinaryDeque<PersistedMetadata> m_pbd;
+    private BinaryDequeReader<PersistedMetadata> m_reader;
 
     private Pair<Long, Long> m_range = new Pair<>(0L, Long.MAX_VALUE);
     private long m_count;
@@ -73,12 +77,12 @@ public class ExportRunner implements Callable<VoltExportResult> {
     private volatile int m_blockId = 0;
 
     private static class PollBlock {
-        final BinaryDequeReader.Entry<ExportRowSchema> m_entry;
+        final BinaryDequeReader.Entry<PersistedMetadata> m_entry;
         final long m_start;
         final long m_last;
         final long m_count;
 
-        PollBlock(BinaryDequeReader.Entry<ExportRowSchema> entry, long start, long count) {
+        PollBlock(BinaryDequeReader.Entry<PersistedMetadata> entry, long start, long count) {
             m_entry = entry;
             m_start = start;
             m_count = count;
@@ -89,15 +93,20 @@ public class ExportRunner implements Callable<VoltExportResult> {
             m_entry.release();
         }
 
+        public ExportRowSchema getSchema() {
+            return m_entry.getExtraHeader().getSchema();
+        }
+
         @Override
         public String toString() {
             return "[" + m_start + ", " + m_last +  ", " + m_count + "]";
         }
     }
 
-    public ExportRunner(VoltExportConfig cfg, ExportClientBase exportClient) {
+    public ExportRunner(VoltExportConfig cfg, ExportClientBase exportClient, Database db) {
         m_cfg = cfg;
         m_exportClient = exportClient;
+        m_db = db;
     }
 
     @Override
@@ -142,7 +151,7 @@ public class ExportRunner implements Callable<VoltExportResult> {
             } while (true);
         }
         catch (Exception e) {
-            LOG.errorFmt(this + "%s failed, exiting after %d rows", this, m_count);
+            LOG.errorFmt("%s failed, exiting after %d rows", this, m_count);
             e.printStackTrace();
             lastError = e;
         }
@@ -199,7 +208,7 @@ public class ExportRunner implements Callable<VoltExportResult> {
     private PollBlock pollPersistentDeque() {
         PollBlock block = null;
         try {
-            BinaryDequeReader.Entry<ExportRowSchema> entry = m_reader.pollEntry(PersistentBinaryDeque.UNSAFE_CONTAINER_FACTORY);
+            BinaryDequeReader.Entry<PersistedMetadata> entry = m_reader.pollEntry(PersistentBinaryDeque.UNSAFE_CONTAINER_FACTORY);
             if (entry != null) {
                 ByteBuffer b = entry.getData();
                 b.order(ByteOrder.LITTLE_ENDIAN);
@@ -251,26 +260,26 @@ public class ExportRunner implements Callable<VoltExportResult> {
                 // Process rows
                 while (buf.hasRemaining() && canPoll()) {
                     int length = buf.getInt();
-                    byte[] rowdata = new byte[length];
-                    buf.get(rowdata, 0, length);
 
                     // Handle schema change
                     ExportRow schema = edb.getExportRowSchema();
-                    if (schema == null || schema.generation != block.m_entry.getExtraHeader().generation) {
+                    if (schema == null || schema.generation != block.getSchema().generation) {
 
                         // Schema change: must be on start of a block.
                         assert firstRowOfBlock;
 
                         // Set the new schema used to decode rows.
-                        ExportRowSchema newSchema = block.m_entry.getExtraHeader();
+                        ExportRowSchema newSchema = block.getSchema();
                         edb.setExportRowSchema(newSchema);
                     }
 
                     // Get the sequence number of this row
                     seqNo = seqNo == 0L ? block.m_start : seqNo + 1;
 
-                    // handle the range
+                    // handle the range: always decode rows below the range
                     if (seqNo < m_range.getFirst().longValue()) {
+                        row = ExportRow.decodeRow(edb.getExportRowSchema(), m_cfg.partition, buf);
+                        row = null;
                         continue;
                     }
                     else if (seqNo > m_range.getSecond().longValue()) {
@@ -278,8 +287,7 @@ public class ExportRunner implements Callable<VoltExportResult> {
                     }
 
                     // Export row
-                    row = ExportRow.decodeRow(edb.getExportRowSchema(), m_cfg.partition,
-                            System.currentTimeMillis(), rowdata);
+                    row = ExportRow.decodeRow(edb.getExportRowSchema(), m_cfg.partition, buf);
 
                     if (firstRowOfBlock) {
                         edb.onBlockStart(row);
@@ -322,7 +330,7 @@ public class ExportRunner implements Callable<VoltExportResult> {
                     break;
                 }
                 else {
-                    LOG.info(this + " ignores exception and restarts block: ");
+                    LOG.infoFmt("%s ignores exception and restarts block: ", this);
                     e.printStackTrace();
                 }
                 backoffQuantity = doBackoff(backoffQuantity, block);
@@ -340,10 +348,10 @@ public class ExportRunner implements Callable<VoltExportResult> {
         int backoff = curBackoff;
         try {
             if (backoff >= BACKOFF_CAP_MS) {
-                LOG.info(this + " hits maximum restart backoff on block " + block);
+                LOG.infoFmt("%s hits maximum restart backoff on block %s", this, block);
             }
             else {
-                LOG.info(this + " sleeping " + backoff + " seconds on " + block);
+                LOG.infoFmt("%s sleeping %d seconds on %s", this, backoff,  block);
             }
             Thread.sleep(backoff);
         }
@@ -359,12 +367,11 @@ public class ExportRunner implements Callable<VoltExportResult> {
 
     private void handleBlockTimeout(PollBlock block, int blockId) {
         if (m_blockId != blockId) {
-            LOG.warn(this + " hit a spurious block timeout on block " + block
-                    + ": expected " + blockId + ", got " + m_blockId);
+            LOG.warnFmt("%s hit a spurious block timeout on block %s: expected %d, got %d", this, block, blockId, m_blockId);
             return;
         }
 
-        LOG.warn(this + " hit a block timeout on block " + block + ", reset decoder");
+        LOG.warnFmt("%s hit a block timeout on block %s, reset decoder", this, block);
         finalizeDecoder();
         createDecoder();
     }
@@ -398,26 +405,31 @@ public class ExportRunner implements Callable<VoltExportResult> {
         // Create ads
         m_ads = new AdvertisedDataSource(
                 m_cfg.partition,
-                m_cfg.stream_name.toUpperCase(),
-                null,
-                System.currentTimeMillis(),
-                1L,
-                null,
-                null,
-                null,
-                AdvertisedDataSource.ExportFormat.SEVENDOTX);
+                m_cfg.stream_name.toUpperCase());
 
         m_edb = m_exportClient.constructExportDecoder(m_ads);
         String nonce = m_cfg.stream_name.toUpperCase() + "_" + m_cfg.partition;
-        constructPBD(nonce);
+
+        constructPBD(ExportFileVisitor.getPathForExportStream(m_cfg.indir, m_cfg.stream_name, m_cfg.partition),
+                nonce, m_cfg.stream_name, m_cfg.partition);
     }
 
-    private void constructPBD(String nonce) throws IOException {
-        ExportRowSchemaSerializer serializer = new ExportRowSchemaSerializer();
-        m_pbd = PersistentBinaryDeque.builder(nonce, new VoltFile(m_cfg.indir), VOLTLOG)
-                .initialExtraHeader(null, serializer)
+    private void constructPBD(String directory, String nonce, String name, int partition) throws IOException {
+        PersistedMetadata metadata = null;
+        PersistedMetadataSerializer serializer = new PersistedMetadataSerializer();
+
+        Table table = m_db.getTables().get(name);
+        if (table == null) {
+            throw new IllegalArgumentException("Table not found in catalog");
+        }
+
+        metadata = new PersistedMetadata(table, null, partition, 1L, Long.MAX_VALUE);
+
+        m_pbd = PersistentBinaryDeque.builder(nonce, new File(directory), VOLTLOG)
+                .initialExtraHeader(metadata, serializer)
                 .compression(true)
                 .deleteExisting(false)
+                .requiresId(true)
                 .build();
     }
 
@@ -425,15 +437,17 @@ public class ExportRunner implements Callable<VoltExportResult> {
         ExportSequenceNumberTracker tracker = new ExportSequenceNumberTracker();
         m_pbd.scanEntries(new BinaryDequeScanner() {
             @Override
-            public void scan(BBContainer bbc) {
+            public long scan(BBContainer bbc) {
                 ByteBuffer b = bbc.b();
                 ByteOrder endianness = b.order();
                 b.order(ByteOrder.LITTLE_ENDIAN);
                 final long startSequenceNumber = b.getLong();
-                b.getLong(); // committedSequenceNumber
+                b.getLong(); // committed sequence number
                 final int tupleCount = b.getInt();
+                final long endSequenceNumber = startSequenceNumber + tupleCount - 1;
                 b.order(endianness);
-                tracker.addRange(startSequenceNumber, startSequenceNumber + tupleCount - 1);
+                tracker.addRange(startSequenceNumber, endSequenceNumber);
+                return endSequenceNumber;
             }
 
         });
